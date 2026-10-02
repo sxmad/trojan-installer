@@ -5,7 +5,7 @@ IFS=$'\n\t'
 umask 077
 
 readonly SCRIPT_NAME="trojan-installer"
-readonly SCRIPT_VERSION="2026-10-02.5"
+readonly SCRIPT_VERSION="2026-10-02.6"
 readonly TROJAN_VERSION="1.16.0"
 readonly TROJAN_TARBALL="trojan-${TROJAN_VERSION}-linux-amd64.tar.xz"
 readonly TROJAN_URL="https://github.com/trojan-gfw/trojan/releases/download/v${TROJAN_VERSION}/${TROJAN_TARBALL}"
@@ -49,6 +49,7 @@ INSTALL_BACKUP_DIR=""
 PREV_SERVICE_ACTIVE=0
 PREV_FALLBACK_ACTIVE=0
 PREV_RENEW_ACTIVE=0
+PREV_RENEW_SERVICE_ACTIVE=0
 PREV_SERVICE_ENABLED=0
 PREV_FALLBACK_ENABLED=0
 PREV_RENEW_ENABLED=0
@@ -648,6 +649,7 @@ restore_previous_install() {
     if ((PREV_FALLBACK_ACTIVE)); then systemctl start "${FALLBACK_SERVICE}" >/dev/null 2>&1 || true; fi
     if ((PREV_SERVICE_ACTIVE)); then systemctl start "${SERVICE}" >/dev/null 2>&1 || true; fi
     if ((PREV_RENEW_ACTIVE)); then systemctl start "${RENEW_TIMER}" >/dev/null 2>&1 || true; else systemctl stop "${RENEW_TIMER}" >/dev/null 2>&1 || true; fi
+    if ((PREV_RENEW_SERVICE_ACTIVE)); then systemctl start "${RENEW_SERVICE}" >/dev/null 2>&1 || true; fi
     if ((PREV_FALLBACK_ENABLED)); then systemctl enable "${FALLBACK_SERVICE}" >/dev/null 2>&1 || true; else systemctl disable "${FALLBACK_SERVICE}" >/dev/null 2>&1 || true; fi
     if ((PREV_SERVICE_ENABLED)); then systemctl enable "${SERVICE}" >/dev/null 2>&1 || true; else systemctl disable "${SERVICE}" >/dev/null 2>&1 || true; fi
     if ((PREV_RENEW_ENABLED)); then systemctl enable "${RENEW_TIMER}" >/dev/null 2>&1 || true; else systemctl disable "${RENEW_TIMER}" >/dev/null 2>&1 || true; fi
@@ -742,15 +744,17 @@ install_trojan() {
     FRESH_INSTALL=1
   fi
   backup_existing
-  PREV_SERVICE_ACTIVE=0; PREV_FALLBACK_ACTIVE=0; PREV_RENEW_ACTIVE=0
+  PREV_SERVICE_ACTIVE=0; PREV_FALLBACK_ACTIVE=0; PREV_RENEW_ACTIVE=0; PREV_RENEW_SERVICE_ACTIVE=0
   PREV_SERVICE_ENABLED=0; PREV_FALLBACK_ENABLED=0; PREV_RENEW_ENABLED=0; NEW_SERVICES_STARTED=0
   systemctl is-active --quiet "${SERVICE}" 2>/dev/null && PREV_SERVICE_ACTIVE=1 || true
   systemctl is-active --quiet "${FALLBACK_SERVICE}" 2>/dev/null && PREV_FALLBACK_ACTIVE=1 || true
   systemctl is-active --quiet "${RENEW_TIMER}" 2>/dev/null && PREV_RENEW_ACTIVE=1 || true
+  systemctl is-active --quiet "${RENEW_SERVICE}" 2>/dev/null && PREV_RENEW_SERVICE_ACTIVE=1 || true
   systemctl is-enabled --quiet "${SERVICE}" 2>/dev/null && PREV_SERVICE_ENABLED=1 || true
   systemctl is-enabled --quiet "${FALLBACK_SERVICE}" 2>/dev/null && PREV_FALLBACK_ENABLED=1 || true
   systemctl is-enabled --quiet "${RENEW_TIMER}" 2>/dev/null && PREV_RENEW_ENABLED=1 || true
   systemctl stop "${RENEW_TIMER}" >/dev/null 2>&1 || true
+  systemctl stop "${RENEW_SERVICE}" >/dev/null 2>&1 || true
   INSTALL_RESTORE=1
   trap restore_previous_install EXIT
   USER_PREEXISTED=1; BINARY_PREEXISTED=1
