@@ -20,7 +20,7 @@ For up to 15 users with speed as the priority, start with Debian 13, `e2-standar
 
 ## One-click installation
 
-Installer revision: `2026-10-02.3`. Supply your own domain and email:
+Installer revision: `2026-10-02.4`. Supply your own domain and email:
 
 ```bash
 sudo -i
@@ -34,7 +34,7 @@ The script installs `lego`, `qrencode`, and other dependencies, downloads and ve
 
 1. Point an A record at the VM’s static public IPv4. Remove a stale AAAA record that points elsewhere; the installer stops when it sees AAAA because ACME may choose the wrong IPv6. Do not use Cloudflare’s orange-cloud proxy.
 2. Allow **TCP 443** in the Google Cloud VPC firewall. The rule target must match this VM’s VPC, network tag, or service account, and the source ranges must cover clients and Let’s Encrypt.
-3. Use an official Debian 12/13 or Ubuntu LTS image and allow the VM to reach Debian package mirrors, the GitHub release, and the ACME service.
+3. Use an official x86_64 Debian 12/13 or Ubuntu LTS image and allow the VM to reach Debian package mirrors, the GitHub release, and the ACME service.
 
 The installer does not change Google Cloud firewall rules, disable UFW/firewalld, install Nginx, upload account credentials, or reboot the VM. During issuance Trojan stops for a few seconds while `lego` uses TCP 443 for the challenge.
 
@@ -48,6 +48,7 @@ The installer does not change Google Cloud firewall rules, disable UFW/firewalld
 | `--version v1.16.0` | Only the pinned official version is accepted; omission still uses v1.16.0. |
 | `--no-page` | Skip the `asdfq` index page while keeping the local HTTPS fallback and proxy self-test. |
 | `--yes` / `-y` | Skip the overwrite confirmation; certificate errors and self-tests still stop. |
+| `--keep-credentials` | Keep the generated URI, QR files, and current config backup during uninstall; these are removed by default. |
 | `--help` | Show usage and the revision. |
 
 Missing domain/email values are read from the terminal. With `--password-stdin`, identity values are read only from `/dev/tty`, so the password pipe is not consumed; without a terminal, installation stops.
@@ -96,7 +97,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/sxmad/trojan-installer/main/
 bash <(curl -fsSL https://raw.githubusercontent.com/sxmad/trojan-installer/main/install.sh) uninstall
 ```
 
-After confirmation it stops and removes Trojan, the fallback service, the renewal timer, config, certificate copies, static page, lego account/certificate data, and the `trojan` user and BBR file created by this installer. Pre-existing Trojan users, binaries, and unrelated files are kept. `/root/trojan-domain.{txt,png}`, config backups, packages, DNS, and Google Cloud firewall rules remain.
+After confirmation it stops and removes Trojan, the fallback service, the renewal timer, config, certificate copies, static page, lego account/certificate data, and the `trojan` user and BBR file created by this installer. It also removes the generated `/root/trojan-domain.{txt,png}` and current config backup by default; use `--keep-credentials` to retain them. Pre-existing Trojan users, binaries, and files outside installer-managed paths are kept. Packages, DNS, and Google Cloud firewall rules remain.
 
 A reinstall immediately after uninstall requests a new ACME certificate and may hit CA rate limits. Use a new VM to test first-boot dependencies and issuance; no VM reboot is required.
 
@@ -113,7 +114,6 @@ Scan or import the URI and confirm: type Trojan, domain address, port `443`, the
 | Service is active but the phone has no Internet | Check TCP 443, the QR’s current password, Peer/SNI, Shadowrocket routing, and another client network. |
 | HTTPS page works but proxy does not | The page tests TLS fallback only; check the password, URI, and client config. |
 | `apt-get` prints `Get`, `Hit`, or `Reading package lists... Done` | Dependency logs only; wait for issuance, self-tests, and the QR. |
-| `Unsupported Config Type` | The Trojan config must use a `.json` file; this is not an old-protocol error. |
 | BBR is not enabled | Check `cat /proc/sys/net/ipv4/tcp_available_congestion_control`; unsupported kernels keep the system default. |
 
 Logs may contain client addresses or authentication-related fields. Redact them before sharing:
@@ -128,7 +128,7 @@ ss -H -ltnp 'sport = :443'
 
 - The script pins the official Trojan-GFW v1.16.0 URL and release tarball SHA256; failed downloads or checksums stop installation.
 - The config is `root:trojan` mode `0640`; the private-key copy is `root:trojan` mode `0640`; the service runs as `trojan` with only the capability needed to bind 443.
-- It does not execute third-party `curl | bash`, publish client archives, disable host firewalls, or install external BBR scripts.
+- It does not call third-party installer scripts, publish client archives, disable host firewalls, or install external BBR scripts.
 - Trojan provides TCP/TLS proxying only; speed depends mainly on the Google Cloud region, ISP route, and TCP loss.
 
 ## Validation scope

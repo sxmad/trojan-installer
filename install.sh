@@ -5,7 +5,7 @@ IFS=$'\n\t'
 umask 077
 
 readonly SCRIPT_NAME="trojan-installer"
-readonly SCRIPT_VERSION="2026-10-02.3"
+readonly SCRIPT_VERSION="2026-10-02.4"
 readonly TROJAN_VERSION="1.16.0"
 readonly TROJAN_TARBALL="trojan-${TROJAN_VERSION}-linux-amd64.tar.xz"
 readonly TROJAN_URL="https://github.com/trojan-gfw/trojan/releases/download/v${TROJAN_VERSION}/${TROJAN_TARBALL}"
@@ -34,6 +34,7 @@ EMAIL=""
 PASSWORD=""
 PASSWORD_FROM_STDIN=0
 YES=0
+KEEP_CREDENTIALS=0
 VERSION=""
 STATIC_PAGE=1
 CERT_CREATED=0
@@ -47,6 +48,10 @@ BINARY_BACKUP=""
 INSTALL_BACKUP_DIR=""
 PREV_SERVICE_ACTIVE=0
 PREV_FALLBACK_ACTIVE=0
+PREV_RENEW_ACTIVE=0
+PREV_SERVICE_ENABLED=0
+PREV_FALLBACK_ENABLED=0
+PREV_RENEW_ENABLED=0
 INSTALL_RESTORE=0
 NEW_SERVICES_STARTED=0
 USER_CREATED=0
@@ -79,6 +84,7 @@ Install options:
   --version VERSION     Only the pinned official version v1.16.0 is supported
   --no-page             Do not create the local HTTPS fallback page
   --yes                 Do not ask before replacing an existing installation
+  --keep-credentials    Keep generated URI/QR files and the current config backup on uninstall
   -h, --help            Show this help
 
 The installer uses the official Trojan-GFW v1.16.0 binary, TCP 443, a
@@ -103,6 +109,7 @@ parse_args() {
       --version) (($# >= 2)) || die "--version 需要参数。"; VERSION="$2"; shift ;;
       --no-page|--no-masquerade) STATIC_PAGE=0 ;;
       --yes|-y) YES=1 ;;
+      --keep-credentials) KEEP_CREDENTIALS=1 ;;
       -h|--help) usage; exit 0 ;;
       *) die "未知参数：${arg}。使用 --help 查看用法。" ;;
     esac
@@ -142,7 +149,7 @@ valid_domain() {
   done
 }
 
-validate_inputs() {
+validate_identity() {
   [[ -n "${DOMAIN}" ]] || die "域名不能为空。"
   [[ -n "${EMAIL}" ]] || die "邮箱不能为空。"
   valid_domain "${DOMAIN}" || die "域名格式不正确：${DOMAIN}"
@@ -150,6 +157,10 @@ validate_inputs() {
   local localpart="${EMAIL%@*}" maildomain="${EMAIL#*@}"
   [[ "${localpart}" != .* && "${localpart}" != *. && "${localpart}" != *..* ]] || die "邮箱格式不正确：${EMAIL}"
   valid_domain "${maildomain}" || die "邮箱域名格式不正确：${EMAIL}"
+}
+
+validate_inputs() {
+  validate_identity
   if [[ -n "${VERSION}" && "${VERSION}" != "v${TROJAN_VERSION}" ]]; then
     die "当前安装器只支持官方 Trojan-GFW v${TROJAN_VERSION}。"
   fi
@@ -233,17 +244,38 @@ write_state() {
     "${DOMAIN}" "${CERT_CREATED}" "${BBR_CREATED}" "${BBR_OLD_CC}" "${BBR_OLD_QDISC}" \
     "${USER_PREEXISTED:-1}" "${BINARY_PREEXISTED:-1}" >"${STATE_FILE}"
   [[ -z "${BINARY_BACKUP}" ]] || printf 'binary_backup=%s\n' "${BINARY_BACKUP}" >>"${STATE_FILE}"
+  [[ -z "${INSTALL_BACKUP_DIR}" ]] || printf 'backup_dir=%s\n' "${INSTALL_BACKUP_DIR}" >>"${STATE_FILE}"
   chmod 0600 "${STATE_FILE}"
 }
 
 backup_existing() {
-  [[ -f "${CONFIG_FILE}" || -f "${CERT_FILE}" || -f "${KEY_FILE}" ]] || return 0
+  local has_existing=0 path
+  for path in \
+    "${CONFIG_FILE}" "${CERT_FILE}" "${KEY_FILE}" "${BINARY}" \
+    "/etc/systemd/system/${SERVICE}" "/etc/systemd/system/${FALLBACK_SERVICE}" \
+    "/etc/systemd/system/${RENEW_SERVICE}" "/etc/systemd/system/${RENEW_TIMER}" \
+    "${RENEW_SCRIPT}" "/etc/sysctl.d/99-trojan-installer-bbr.conf" \
+    "${STATIC_DIR}" "${LEGO_DIR}" "${STATE_DIR}"; do
+    if [[ -e "${path}" ]]; then has_existing=1; break; fi
+  done
+  ((has_existing)) || return 0
   install -d -m 0700 "${BACKUP_DIR}"
   INSTALL_BACKUP_DIR="${BACKUP_DIR}/install-$(date +%Y%m%d-%H%M%S)"
   install -d -m 0700 "${INSTALL_BACKUP_DIR}"
   [[ -f "${CONFIG_FILE}" ]] && cp -p "${CONFIG_FILE}" "${INSTALL_BACKUP_DIR}/server.json"
   [[ -f "${CERT_FILE}" ]] && cp -p "${CERT_FILE}" "${INSTALL_BACKUP_DIR}/cert.pem"
   [[ -f "${KEY_FILE}" ]] && cp -p "${KEY_FILE}" "${INSTALL_BACKUP_DIR}/key.pem"
+  install -d -m 0700 "${INSTALL_BACKUP_DIR}/managed"
+  for path in \
+    "/etc/systemd/system/${SERVICE}" "/etc/systemd/system/${FALLBACK_SERVICE}" \
+    "/etc/systemd/system/${RENEW_SERVICE}" "/etc/systemd/system/${RENEW_TIMER}" \
+    "${RENEW_SCRIPT}" "/etc/sysctl.d/99-trojan-installer-bbr.conf" \
+    "${STATIC_DIR}" "${LEGO_DIR}" "${STATE_DIR}"; do
+    if [[ -e "${path}" ]]; then
+      install -d -m 0700 "${INSTALL_BACKUP_DIR}/managed$(dirname "${path}")"
+      cp -a "${path}" "${INSTALL_BACKUP_DIR}/managed${path}"
+    fi
+  done
   info "已备份现有配置：${INSTALL_BACKUP_DIR}"
 }
 
@@ -263,7 +295,7 @@ download_binary() {
   staged="${BINARY}.new.$$"
   mkdir "${extracted}"
   info "下载并校验官方 Trojan-GFW v${TROJAN_VERSION}..."
-  if ! curl -fL --retry 2 --connect-timeout 15 --max-time 120 -o "${tarball}" "${TROJAN_URL}"; then
+  if ! curl --proto '=https' --tlsv1.2 -fL --retry 2 --connect-timeout 15 --max-time 120 -o "${tarball}" "${TROJAN_URL}"; then
     rm -rf -- "${tmp}"
     die "官方 Trojan 下载失败。"
   fi
@@ -285,20 +317,24 @@ download_binary() {
 }
 
 write_static_page() {
-  install -d -o trojan -g trojan -m 0755 "${STATIC_DIR}"
+  install -d -o root -g trojan -m 0750 "${HOME_DIR}"
+  install -d -o root -g trojan -m 0750 "${STATIC_DIR}"
   if (( ! STATIC_PAGE )); then
     rm -f "${STATIC_DIR}/index.html"
     return 0
   fi
-  cat >"${STATIC_DIR}/index.html" <<'EOF'
+  local tmp="${STATIC_DIR}/index.html.tmp.$$"
+  cat >"${tmp}" <<'EOF'
 <!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"><title>asdfq</title></head>
 <body>asdfq</body>
 </html>
 EOF
-  chown trojan:trojan "${STATIC_DIR}/index.html"
-  chmod 0644 "${STATIC_DIR}/index.html"
+  chown root:trojan "${tmp}"
+  chmod 0640 "${tmp}"
+  rm -f "${STATIC_DIR}/index.html"
+  mv -f "${tmp}" "${STATIC_DIR}/index.html"
 }
 
 write_fallback_service() {
@@ -385,13 +421,17 @@ sync_certificate() {
 }
 
 cert_valid() {
-  local cert="${LEGO_DIR}/certificates/${DOMAIN}.crt"
-  [[ -s "${cert}" ]] || return 1
+  local cert="${LEGO_DIR}/certificates/${DOMAIN}.crt" key="${LEGO_DIR}/certificates/${DOMAIN}.key" cert_pub key_pub
+  [[ -s "${cert}" && -s "${key}" ]] || return 1
   openssl x509 -in "${cert}" -noout -checkend 2592000 >/dev/null 2>&1 || return 1
-  openssl x509 -in "${cert}" -noout -ext subjectAltName 2>/dev/null | grep -Fq "DNS:${DOMAIN}"
+  openssl x509 -in "${cert}" -noout -checkhost "${DOMAIN}" >/dev/null 2>&1 || return 1
+  cert_pub="$(openssl x509 -in "${cert}" -pubkey -noout | openssl pkey -pubin -outform DER 2>/dev/null | sha256sum)" || return 1
+  key_pub="$(openssl pkey -in "${key}" -pubout 2>/dev/null | openssl pkey -pubin -outform DER 2>/dev/null | sha256sum)" || return 1
+  [[ -n "${cert_pub}" && "${cert_pub}" == "${key_pub}" ]]
 }
 
 obtain_certificate() {
+  install -d -o root -g root -m 0700 "${LEGO_DIR}"
   if cert_valid; then
     info "复用仍有效的 Let’s Encrypt 证书。"
     sync_certificate
@@ -515,6 +555,7 @@ write_service() {
 Description=Trojan-GFW server
 Documentation=https://trojan-gfw.github.io/trojan/config.html
 After=network-online.target nss-lookup.target ${FALLBACK_SERVICE}
+Requires=${FALLBACK_SERVICE}
 Wants=network-online.target
 
 [Service]
@@ -524,6 +565,14 @@ Group=trojan
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 ExecStart=${BINARY} ${CONFIG_FILE}
 ExecReload=/bin/kill -USR1 \$MAINPID
 Restart=on-failure
@@ -552,11 +601,12 @@ service_diagnostics() {
 }
 
 restore_previous_install() {
-  local rc=$?
+  local rc=$? path backup_path
   trap - EXIT
   if ((INSTALL_RESTORE)); then
     systemctl stop "${SERVICE}" "${FALLBACK_SERVICE}" >/dev/null 2>&1 || true
     if [[ -n "${INSTALL_BACKUP_DIR}" ]]; then
+      for path in "${CONFIG_FILE}" "${CERT_FILE}" "${KEY_FILE}"; do rm -f "${path}"; done
       [[ -f "${INSTALL_BACKUP_DIR}/server.json" ]] && cp -p "${INSTALL_BACKUP_DIR}/server.json" "${CONFIG_FILE}"
       [[ -f "${INSTALL_BACKUP_DIR}/cert.pem" ]] && cp -p "${INSTALL_BACKUP_DIR}/cert.pem" "${CERT_FILE}"
       [[ -f "${INSTALL_BACKUP_DIR}/key.pem" ]] && cp -p "${INSTALL_BACKUP_DIR}/key.pem" "${KEY_FILE}"
@@ -579,9 +629,28 @@ restore_previous_install() {
       rm -rf -- "${STATIC_DIR}" "${LEGO_DIR}"
       [[ -d "${CONFIG_DIR}" ]] && rmdir "${CONFIG_DIR}" 2>/dev/null || true
       rm -rf -- "${STATE_DIR}"
+      if ((USER_CREATED)); then rm -rf -- "${HOME_DIR}"; fi
+    elif [[ -n "${INSTALL_BACKUP_DIR}" ]]; then
+      for path in \
+        "/etc/systemd/system/${SERVICE}" "/etc/systemd/system/${FALLBACK_SERVICE}" \
+        "/etc/systemd/system/${RENEW_SERVICE}" "/etc/systemd/system/${RENEW_TIMER}" \
+        "${RENEW_SCRIPT}" "/etc/sysctl.d/99-trojan-installer-bbr.conf" \
+        "${STATIC_DIR}" "${LEGO_DIR}" "${STATE_DIR}"; do
+        backup_path="${INSTALL_BACKUP_DIR}/managed${path}"
+        rm -rf -- "${path}"
+        if [[ -e "${backup_path}" ]]; then
+          mkdir -p "$(dirname "${path}")"
+          cp -a "${backup_path}" "${path}"
+        fi
+      done
+      systemctl daemon-reload >/dev/null 2>&1 || true
     fi
     if ((PREV_FALLBACK_ACTIVE)); then systemctl start "${FALLBACK_SERVICE}" >/dev/null 2>&1 || true; fi
     if ((PREV_SERVICE_ACTIVE)); then systemctl start "${SERVICE}" >/dev/null 2>&1 || true; fi
+    if ((PREV_RENEW_ACTIVE)); then systemctl start "${RENEW_TIMER}" >/dev/null 2>&1 || true; else systemctl stop "${RENEW_TIMER}" >/dev/null 2>&1 || true; fi
+    if ((PREV_FALLBACK_ENABLED)); then systemctl enable "${FALLBACK_SERVICE}" >/dev/null 2>&1 || true; else systemctl disable "${FALLBACK_SERVICE}" >/dev/null 2>&1 || true; fi
+    if ((PREV_SERVICE_ENABLED)); then systemctl enable "${SERVICE}" >/dev/null 2>&1 || true; else systemctl disable "${SERVICE}" >/dev/null 2>&1 || true; fi
+    if ((PREV_RENEW_ENABLED)); then systemctl enable "${RENEW_TIMER}" >/dev/null 2>&1 || true; else systemctl disable "${RENEW_TIMER}" >/dev/null 2>&1 || true; fi
   fi
   exit "${rc}"
 }
@@ -655,6 +724,7 @@ install_trojan() {
   require_root; check_platform
   info "安装器版本：${SCRIPT_VERSION}（Trojan-GFW v${TROJAN_VERSION}）"
   collect_identity
+  validate_identity
   install_prerequisites
   require_command curl; require_command openssl; require_command lego; require_command python3; require_command ss; require_command systemctl
   LEGO_BIN="$(command -v lego)"
@@ -667,13 +737,20 @@ install_trojan() {
   if [[ ! -e "${CONFIG_FILE}" && ! -e "${BINARY}" && \
         ! -e "/etc/systemd/system/${SERVICE}" && \
         ! -e "/etc/systemd/system/${FALLBACK_SERVICE}" && \
-        ! -e "${STATE_FILE}" ]]; then
+        ! -e "${STATE_FILE}" && ! -e "${STATIC_DIR}" && ! -e "${LEGO_DIR}" && \
+        ! -e "/etc/sysctl.d/99-trojan-installer-bbr.conf" ]]; then
     FRESH_INSTALL=1
   fi
   backup_existing
-  PREV_SERVICE_ACTIVE=0; PREV_FALLBACK_ACTIVE=0; NEW_SERVICES_STARTED=0
+  PREV_SERVICE_ACTIVE=0; PREV_FALLBACK_ACTIVE=0; PREV_RENEW_ACTIVE=0
+  PREV_SERVICE_ENABLED=0; PREV_FALLBACK_ENABLED=0; PREV_RENEW_ENABLED=0; NEW_SERVICES_STARTED=0
   systemctl is-active --quiet "${SERVICE}" 2>/dev/null && PREV_SERVICE_ACTIVE=1 || true
   systemctl is-active --quiet "${FALLBACK_SERVICE}" 2>/dev/null && PREV_FALLBACK_ACTIVE=1 || true
+  systemctl is-active --quiet "${RENEW_TIMER}" 2>/dev/null && PREV_RENEW_ACTIVE=1 || true
+  systemctl is-enabled --quiet "${SERVICE}" 2>/dev/null && PREV_SERVICE_ENABLED=1 || true
+  systemctl is-enabled --quiet "${FALLBACK_SERVICE}" 2>/dev/null && PREV_FALLBACK_ENABLED=1 || true
+  systemctl is-enabled --quiet "${RENEW_TIMER}" 2>/dev/null && PREV_RENEW_ENABLED=1 || true
+  systemctl stop "${RENEW_TIMER}" >/dev/null 2>&1 || true
   INSTALL_RESTORE=1
   trap restore_previous_install EXIT
   USER_PREEXISTED=1; BINARY_PREEXISTED=1
@@ -718,7 +795,9 @@ install_trojan() {
   if ! systemctl is-active --quiet "${SERVICE}" || ! port_ready; then service_diagnostics; systemctl stop "${SERVICE}" || true; die "Trojan 未稳定监听 TCP 443；未生成连接信息。"; fi
   if ! local_selftest; then die "本机 Trojan 功能自测未通过；服务和配置已保留，未生成连接信息。"; fi
   write_state
-  systemctl enable --now "${RENEW_TIMER}" >/dev/null
+  if ! systemctl enable --now "${RENEW_TIMER}" >/dev/null; then
+    warn "证书自动续期 timer 启动失败；Trojan 服务已可用，请稍后检查 ${RENEW_TIMER}。"
+  fi
   INSTALL_RESTORE=0
   trap - EXIT
   print_connection
@@ -754,7 +833,7 @@ update_trojan() {
 uninstall_trojan() {
   require_root
   if (( ! YES )); then local answer; read -r -p "这会停止并删除 Trojan 服务，继续？[y/N] " answer || die "已取消。"; [[ "${answer}" =~ ^[Yy]$ ]] || die "已取消。"; fi
-  local user_preexisted=1 binary_preexisted=1 bbr_created=0 bbr_old_cc="" bbr_old_qdisc="" binary_backup=""
+  local user_preexisted=1 binary_preexisted=1 bbr_created=0 bbr_old_cc="" bbr_old_qdisc="" binary_backup="" backup_dir="" installed_domain=""
   [[ -r "${STATE_FILE}" ]] && grep -qx 'user_preexisted=0' "${STATE_FILE}" && user_preexisted=0
   [[ -r "${STATE_FILE}" ]] && grep -qx 'binary_preexisted=0' "${STATE_FILE}" && binary_preexisted=0
   [[ -r "${STATE_FILE}" ]] && grep -qx 'bbr_created=1' "${STATE_FILE}" && bbr_created=1
@@ -762,6 +841,8 @@ uninstall_trojan() {
     bbr_old_cc="$(sed -n 's/^bbr_old_cc=//p' "${STATE_FILE}" | head -n1)"
     bbr_old_qdisc="$(sed -n 's/^bbr_old_qdisc=//p' "${STATE_FILE}" | head -n1)"
     binary_backup="$(sed -n 's/^binary_backup=//p' "${STATE_FILE}" | head -n1)"
+    backup_dir="$(sed -n 's/^backup_dir=//p' "${STATE_FILE}" | head -n1)"
+    installed_domain="$(sed -n 's/^domain=//p' "${STATE_FILE}" | head -n1)"
   fi
   systemctl disable --now "${SERVICE}" >/dev/null 2>&1 || true
   systemctl disable --now "${FALLBACK_SERVICE}" >/dev/null 2>&1 || true
@@ -772,7 +853,10 @@ uninstall_trojan() {
   rm -f "${CONFIG_FILE}" "${CERT_FILE}" "${KEY_FILE}"
   if [[ -r "${STATE_FILE}" ]] && grep -Eq '^state_version=[12]$' "${STATE_FILE}"; then
     rm -rf -- "${STATIC_DIR}" "${LEGO_DIR}"
-    if ((user_preexisted == 0)); then userdel trojan >/dev/null 2>&1 || true; fi
+    if ((user_preexisted == 0)); then
+      userdel trojan >/dev/null 2>&1 || true
+      rm -rf -- "${HOME_DIR}"
+    fi
   fi
   [[ -d "${CONFIG_DIR}" ]] && rmdir "${CONFIG_DIR}" 2>/dev/null || true
   rm -rf -- "${STATE_DIR}"
@@ -786,7 +870,15 @@ uninstall_trojan() {
     [[ -z "${bbr_old_qdisc}" ]] || sysctl -w "net.core.default_qdisc=${bbr_old_qdisc}" >/dev/null 2>&1 || true
     rm -f /etc/sysctl.d/99-trojan-installer-bbr.conf
   fi
-  info "Trojan 已卸载；连接二维码、配置备份、依赖包和云端 DNS/防火墙规则仍保留。安装器管理的 lego 证书账户已删除。"
+  if (( ! KEEP_CREDENTIALS )); then
+    if [[ "${installed_domain}" =~ ^[A-Za-z0-9.-]+$ ]]; then
+      rm -f "/root/trojan-${installed_domain}.txt" "/root/trojan-${installed_domain}.png"
+    fi
+    [[ -z "${backup_dir}" ]] || rm -rf -- "${backup_dir}"
+    info "Trojan 已卸载；本次生成的 URI、二维码和配置备份已删除。依赖包、DNS 和 Google Cloud 防火墙规则仍保留。"
+  else
+    info "Trojan 已卸载；已保留本次生成的 URI、二维码和配置备份。依赖包、DNS 和 Google Cloud 防火墙规则仍保留。"
+  fi
 }
 
 service_action() { require_root; systemctl "${ACTION}" "${SERVICE}"; }

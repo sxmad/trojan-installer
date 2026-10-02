@@ -20,7 +20,7 @@
 
 ## 一键安装
 
-安装器修订号：`2026-10-02.3`。必须填写自己的域名和邮箱：
+安装器修订号：`2026-10-02.4`。必须填写自己的域名和邮箱：
 
 ```bash
 sudo -i
@@ -34,7 +34,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/sxmad/trojan-installer/main/
 
 1. 将域名 A 记录指向 VM 的静态公网 IPv4。不要保留指向别处的旧 AAAA 记录；脚本发现 AAAA 时会停止，以免 ACME 走错误的 IPv6。不要使用 Cloudflare 橙云代理。
 2. Google Cloud VPC 防火墙只需放行 **TCP 443**，目标必须匹配此 VM 的 VPC、网络标记或服务账号，源地址范围应覆盖客户端和 Let’s Encrypt。
-3. 使用官方 Debian 12/13 或 Ubuntu LTS 镜像，并确保 VM 可以访问 Debian 软件源、GitHub release 和 ACME 服务。
+3. 使用 x86_64 架构的官方 Debian 12/13 或 Ubuntu LTS 镜像，并确保 VM 可以访问 Debian 软件源、GitHub release 和 ACME 服务。
 
 安装器不会修改 Google Cloud 防火墙、关闭 UFW/firewalld、安装 Nginx、上传账号凭据或重启 VM。证书申请期间 Trojan 会短暂停止几秒，让 `lego` 使用 TCP 443 完成挑战。
 
@@ -48,6 +48,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/sxmad/trojan-installer/main/
 | `--version v1.16.0` | 仅允许当前固定的官方版本；省略时仍使用 v1.16.0。 |
 | `--no-page` | 不写入 `asdfq` 首页，但仍保留本地 HTTPS 回落服务和代理自测。 |
 | `--yes` / `-y` | 跳过覆盖已有安装的确认；不会跳过证书错误或自测。 |
+| `--keep-credentials` | 卸载时保留本次生成的 URI、二维码和配置备份；默认会删除这些凭据文件。 |
 | `--help` | 显示用法和修订号。 |
 
 缺少域名或邮箱时，普通模式从当前终端询问；和 `--password-stdin` 一起使用时，身份信息只从 `/dev/tty` 读取，不会消耗密码管道。没有交互终端则停止。
@@ -80,7 +81,7 @@ systemctl is-active trojan.service
 systemctl list-timers trojan-cert-renew.timer
 ```
 
-自动续期由 `trojan-cert-renew.timer` 每天检查。需要续期时，它会停止 Trojan、让 `lego` 临时监听 TCP 443、同步新证书再启动 Trojan；失败时会尝试恢复服务，并把日志写入 journal。
+自动续期由 `trojan-cert-renew.timer` 每天检查。需要续期时，它会停止 Trojan、让 `lego` 临时监听 TCP 443、同步新证书，再恢复续期前的服务状态；失败时会尝试恢复服务，并把日志写入 journal。
 
 更新固定官方程序并保留现有配置和密码：
 
@@ -96,7 +97,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/sxmad/trojan-installer/main/
 bash <(curl -fsSL https://raw.githubusercontent.com/sxmad/trojan-installer/main/install.sh) uninstall
 ```
 
-确认后会停止并删除 Trojan、回落服务、续期 timer、配置、证书副本、静态页、lego 账户/证书数据，以及本安装器创建的 `trojan` 用户和 BBR 配置。安装前已有的 Trojan 用户、二进制和其他文件不会删除；`/root/trojan-域名.{txt,png}`、配置备份、依赖包、DNS 和 Google Cloud 防火墙规则会保留。
+确认后会停止并删除 Trojan、回落服务、续期 timer、配置、证书副本、静态页、lego 账户/证书数据，以及本安装器创建的 `trojan` 用户和 BBR 配置。默认还会删除本次生成的 `/root/trojan-域名.{txt,png}` 和当前配置备份；使用 `--keep-credentials` 可保留它们。安装前已有的 Trojan 用户、二进制和非安装器管理路径中的文件不会删除，依赖包、DNS 和 Google Cloud 防火墙规则会保留。
 
 卸载后立即重装会重新申请 ACME 证书，可能触发 CA 速率限制。要验证首次依赖安装和证书流程，优先使用新 VM；不需要重启 VM。
 
@@ -113,7 +114,6 @@ bash <(curl -fsSL https://raw.githubusercontent.com/sxmad/trojan-installer/main/
 | 服务 active 但手机无网 | 检查 TCP 443、二维码是否为本次密码、Peer/SNI、Shadowrocket 路由，并换网络测试。 |
 | 能打开 HTTPS 页面但代理不通 | 页面只验证 TLS 回落；检查密码、URI 和客户端配置。 |
 | `apt-get` 显示 `Get`、`Hit`、`Reading package lists... Done` | 只是依赖日志，继续等待证书、自测和二维码。 |
-| `Unsupported Config Type` | Trojan 配置必须是 `.json` 文件；这不是协议过旧。 |
 | BBR 未启用 | 查看 `cat /proc/sys/net/ipv4/tcp_available_congestion_control`；不支持时脚本会保留系统默认 TCP。 |
 
 查看状态和日志时，日志可能包含客户端地址或认证相关字段，分享前请脱敏：
@@ -128,7 +128,7 @@ ss -H -ltnp 'sport = :443'
 
 - 脚本固定官方 Trojan-GFW v1.16.0 下载地址和 release tarball SHA256，下载失败或校验失败不会安装。
 - 配置为 `root:trojan`、`0640`；私钥副本为 `root:trojan`、`0640`；服务以 `trojan` 用户运行，只授予绑定 443 所需的能力。
-- 不执行第三方 `curl | bash`，不下载公开客户端压缩包，不关闭主机防火墙，不安装外部 BBR 脚本。
+- 不调用第三方安装脚本，不下载公开客户端压缩包，不关闭主机防火墙，不安装外部 BBR 脚本。
 - Trojan 只提供 TCP/TLS 代理；速度主要取决于 Google Cloud 地区、运营商线路和 TCP 丢包。
 
 ## 验证范围
