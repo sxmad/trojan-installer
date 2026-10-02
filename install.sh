@@ -5,7 +5,7 @@ IFS=$'\n\t'
 umask 077
 
 readonly SCRIPT_NAME="trojan-installer"
-readonly SCRIPT_VERSION="2026-10-02.2"
+readonly SCRIPT_VERSION="2026-10-02.3"
 readonly TROJAN_VERSION="1.16.0"
 readonly TROJAN_TARBALL="trojan-${TROJAN_VERSION}-linux-amd64.tar.xz"
 readonly TROJAN_URL="https://github.com/trojan-gfw/trojan/releases/download/v${TROJAN_VERSION}/${TROJAN_TARBALL}"
@@ -50,6 +50,7 @@ PREV_FALLBACK_ACTIVE=0
 INSTALL_RESTORE=0
 NEW_SERVICES_STARTED=0
 USER_CREATED=0
+FRESH_INSTALL=0
 
 die() { printf '%s: %s\n' "${SCRIPT_NAME}" "$*" >&2; exit 1; }
 warn() { printf '%s: warning: %s\n' "${SCRIPT_NAME}" "$*" >&2; }
@@ -561,8 +562,10 @@ restore_previous_install() {
       [[ -f "${INSTALL_BACKUP_DIR}/key.pem" ]] && cp -p "${INSTALL_BACKUP_DIR}/key.pem" "${KEY_FILE}"
     fi
     if ((BINARY_PREEXISTED)) && [[ -s "${BINARY_BACKUP}" ]]; then cp -p "${BINARY_BACKUP}" "${BINARY}"; fi
-    if ((USER_CREATED)); then
-      userdel trojan >/dev/null 2>&1 || true
+    if ((FRESH_INSTALL)); then
+      if ((USER_CREATED)); then
+        userdel trojan >/dev/null 2>&1 || true
+      fi
       if ((BBR_CREATED)); then
         [[ -z "${BBR_OLD_CC}" ]] || sysctl -w "net.ipv4.tcp_congestion_control=${BBR_OLD_CC}" >/dev/null 2>&1 || true
         [[ -z "${BBR_OLD_QDISC}" ]] || sysctl -w "net.core.default_qdisc=${BBR_OLD_QDISC}" >/dev/null 2>&1 || true
@@ -661,6 +664,12 @@ install_trojan() {
     die "${DOMAIN} 存在 AAAA 记录，但此安装器只监听 IPv4；请删除错误 AAAA 或先配置可用 IPv6。"
   fi
   confirm_existing
+  if [[ ! -e "${CONFIG_FILE}" && ! -e "${BINARY}" && \
+        ! -e "/etc/systemd/system/${SERVICE}" && \
+        ! -e "/etc/systemd/system/${FALLBACK_SERVICE}" && \
+        ! -e "${STATE_FILE}" ]]; then
+    FRESH_INSTALL=1
+  fi
   backup_existing
   PREV_SERVICE_ACTIVE=0; PREV_FALLBACK_ACTIVE=0; NEW_SERVICES_STARTED=0
   systemctl is-active --quiet "${SERVICE}" 2>/dev/null && PREV_SERVICE_ACTIVE=1 || true

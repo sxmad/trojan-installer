@@ -20,7 +20,7 @@ For up to 15 users with speed as the priority, start with Debian 13, `e2-standar
 
 ## One-click installation
 
-Installer revision: `2026-10-02.2`. Supply your own domain and email:
+Installer revision: `2026-10-02.3`. Supply your own domain and email:
 
 ```bash
 sudo -i
