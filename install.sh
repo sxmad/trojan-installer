@@ -5,7 +5,7 @@ IFS=$'\n\t'
 umask 077
 
 readonly SCRIPT_NAME="trojan-installer"
-readonly SCRIPT_VERSION="2026-10-02.6"
+readonly SCRIPT_VERSION="2026-10-02.7"
 readonly TROJAN_VERSION="1.16.0"
 readonly TROJAN_TARBALL="trojan-${TROJAN_VERSION}-linux-amd64.tar.xz"
 readonly TROJAN_URL="https://github.com/trojan-gfw/trojan/releases/download/v${TROJAN_VERSION}/${TROJAN_TARBALL}"
@@ -875,11 +875,11 @@ uninstall_trojan() {
     rm -f /etc/sysctl.d/99-trojan-installer-bbr.conf
   fi
   if (( ! KEEP_CREDENTIALS )); then
-    if [[ "${installed_domain}" =~ ^[A-Za-z0-9.-]+$ ]]; then
-      rm -f "/root/trojan-${installed_domain}.txt" "/root/trojan-${installed_domain}.png"
-    fi
-    [[ -z "${backup_dir}" ]] || rm -rf -- "${backup_dir}"
-    info "Trojan 已卸载；本次生成的 URI、二维码和配置备份已删除。依赖包、DNS 和 Google Cloud 防火墙规则仍保留。"
+    shopt -s nullglob
+    for credential_file in /root/trojan-*.txt /root/trojan-*.png; do rm -f -- "${credential_file}"; done
+    shopt -u nullglob
+    rm -rf -- "${BACKUP_DIR}"
+    info "Trojan 已卸载；安装器生成的 URI、二维码和配置备份已删除。依赖包、DNS 和 Google Cloud 防火墙规则仍保留。"
   else
     info "Trojan 已卸载；已保留本次生成的 URI、二维码和配置备份。依赖包、DNS 和 Google Cloud 防火墙规则仍保留。"
   fi

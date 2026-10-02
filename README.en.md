@@ -20,7 +20,7 @@ For up to 15 users with speed as the priority, start with Debian 13, `e2-standar
 
 ## One-click installation
 
-Installer revision: `2026-10-02.6`. Supply your own domain and email:
+Installer revision: `2026-10-02.7`. Supply your own domain and email:
 
 ```bash
 sudo -i
@@ -48,7 +48,7 @@ The installer does not change Google Cloud firewall rules, disable UFW/firewalld
 | `--version v1.16.0` | Only the pinned official version is accepted; omission still uses v1.16.0. |
 | `--no-page` | Skip the `asdfq` index page while keeping the local HTTPS fallback and proxy self-test. |
 | `--yes` / `-y` | Skip the overwrite confirmation; certificate errors and self-tests still stop. |
-| `--keep-credentials` | Keep the generated URI, QR files, and current config backup during uninstall; these are removed by default. |
+| `--keep-credentials` | Keep installer-generated URI, QR files, and config backups during uninstall; these are removed by default. |
 | `--help` | Show usage and the revision. |
 
 Missing domain/email values are read from the terminal. With `--password-stdin`, identity values are read only from `/dev/tty`, so the password pipe is not consumed; without a terminal, installation stops.
@@ -97,7 +97,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/sxmad/trojan-installer/main/
 bash <(curl -fsSL https://raw.githubusercontent.com/sxmad/trojan-installer/main/install.sh) uninstall
 ```
 
-After confirmation it stops and removes Trojan, the fallback service, the renewal timer, config, certificate copies, static page, lego account/certificate data, and the `trojan` user and BBR file created by this installer. It also removes the generated `/root/trojan-domain.{txt,png}` and current config backup by default; use `--keep-credentials` to retain them. Pre-existing Trojan users, binaries, and files outside installer-managed paths are kept. Packages, DNS, and Google Cloud firewall rules remain.
+After confirmation it stops and removes Trojan, the fallback service, the renewal timer, config, certificate copies, static page, lego account/certificate data, and the `trojan` user and BBR file created by this installer. It also removes installer-generated `/root/trojan-*.{txt,png}` files and all installer config backups by default; use `--keep-credentials` to retain them. Pre-existing Trojan users, binaries, and files outside installer-managed paths are kept. Packages, DNS, and Google Cloud firewall rules remain.
 
 A reinstall immediately after uninstall requests a new ACME certificate and may hit CA rate limits. Use a new VM to test first-boot dependencies and issuance; no VM reboot is required.
 

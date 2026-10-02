@@ -20,7 +20,7 @@
 
 ## 一键安装
 
-安装器修订号：`2026-10-02.6`。必须填写自己的域名和邮箱：
+安装器修订号：`2026-10-02.7`。必须填写自己的域名和邮箱：
 
 ```bash
 sudo -i
@@ -48,7 +48,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/sxmad/trojan-installer/main/
 | `--version v1.16.0` | 仅允许当前固定的官方版本；省略时仍使用 v1.16.0。 |
 | `--no-page` | 不写入 `asdfq` 首页，但仍保留本地 HTTPS 回落服务和代理自测。 |
 | `--yes` / `-y` | 跳过覆盖已有安装的确认；不会跳过证书错误或自测。 |
-| `--keep-credentials` | 卸载时保留本次生成的 URI、二维码和配置备份；默认会删除这些凭据文件。 |
+| `--keep-credentials` | 卸载时保留安装器生成的 URI、二维码和配置备份；默认会删除这些凭据文件。 |
 | `--help` | 显示用法和修订号。 |
 
 缺少域名或邮箱时，普通模式从当前终端询问；和 `--password-stdin` 一起使用时，身份信息只从 `/dev/tty` 读取，不会消耗密码管道。没有交互终端则停止。
@@ -97,7 +97,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/sxmad/trojan-installer/main/
 bash <(curl -fsSL https://raw.githubusercontent.com/sxmad/trojan-installer/main/install.sh) uninstall
 ```
 
-确认后会停止并删除 Trojan、回落服务、续期 timer、配置、证书副本、静态页、lego 账户/证书数据，以及本安装器创建的 `trojan` 用户和 BBR 配置。默认还会删除本次生成的 `/root/trojan-域名.{txt,png}` 和当前配置备份；使用 `--keep-credentials` 可保留它们。安装前已有的 Trojan 用户、二进制和非安装器管理路径中的文件不会删除，依赖包、DNS 和 Google Cloud 防火墙规则会保留。
+确认后会停止并删除 Trojan、回落服务、续期 timer、配置、证书副本、静态页、lego 账户/证书数据，以及本安装器创建的 `trojan` 用户和 BBR 配置。默认还会删除安装器生成的 `/root/trojan-*.{txt,png}` 和全部安装器配置备份；使用 `--keep-credentials` 可保留它们。安装前已有的 Trojan 用户、二进制和非安装器管理路径中的文件不会删除，依赖包、DNS 和 Google Cloud 防火墙规则会保留。
 
 卸载后立即重装会重新申请 ACME 证书，可能触发 CA 速率限制。要验证首次依赖安装和证书流程，优先使用新 VM；不需要重启 VM。
 
