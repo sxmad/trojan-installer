@@ -5,7 +5,7 @@ IFS=$'\n\t'
 umask 077
 
 readonly SCRIPT_NAME="trojan-installer"
-readonly SCRIPT_VERSION="2026-10-02.4"
+readonly SCRIPT_VERSION="2026-10-02.5"
 readonly TROJAN_VERSION="1.16.0"
 readonly TROJAN_TARBALL="trojan-${TROJAN_VERSION}-linux-amd64.tar.xz"
 readonly TROJAN_URL="https://github.com/trojan-gfw/trojan/releases/download/v${TROJAN_VERSION}/${TROJAN_TARBALL}"
@@ -738,7 +738,7 @@ install_trojan() {
         ! -e "/etc/systemd/system/${SERVICE}" && \
         ! -e "/etc/systemd/system/${FALLBACK_SERVICE}" && \
         ! -e "${STATE_FILE}" && ! -e "${STATIC_DIR}" && ! -e "${LEGO_DIR}" && \
-        ! -e "/etc/sysctl.d/99-trojan-installer-bbr.conf" ]]; then
+        ! -e "${HOME_DIR}" && ! -e "/etc/sysctl.d/99-trojan-installer-bbr.conf" ]]; then
     FRESH_INSTALL=1
   fi
   backup_existing
