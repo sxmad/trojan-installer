@@ -26,6 +26,11 @@ def executable(path, body):
 
 
 class GenerationTests(unittest.TestCase):
+    def test_empty_explicit_password_is_not_replaced_with_random(self):
+        result = shell('DOMAIN=example.com; EMAIL=admin@example.com; PASSWORD_FROM_STDIN=1; validate_inputs', input='\n')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('指定的密码不能为空', result.stderr)
+
     def test_service_generation_under_nounset(self):
         with tempfile.TemporaryDirectory(prefix="trojan-unit-test-") as work:
             base = Path(work)
@@ -194,6 +199,7 @@ class IssuanceTests(unittest.TestCase):
             source = (ROOT / "install.sh").read_text()
             source = source.replace('readonly LEGO_DIR="${HOME_DIR}/lego"',
                                     f"readonly LEGO_DIR={shlex.quote(str(base / 'lego'))}")
+            source = source.replace('/run/lock/trojan-cert-renew.lock', str(base / 'acme.lock'))
             # Exercise interactive retry choices without requiring a terminal in CI.
             source = source.replace('if [[ -t 0 ]]; then', 'if true; then')
             fixture = base / "installer.sh"
@@ -205,6 +211,7 @@ EMAIL=admin@example.com
 PORT=8443
 LEGO_BIN=lego
 install() { mkdir -p "$LEGO_DIR"; }
+port_in_use() { return 1; }
 cert_valid() { [[ -f "$TEST_WORK/valid" ]]; }
 sync_certificate() { echo CERT_DEPLOYED; }
 sleep() { :; }

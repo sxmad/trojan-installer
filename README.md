@@ -4,7 +4,7 @@
 
 Trojan-GFW installer for x86_64 Debian/Ubuntu Google Cloud VMs, with Shadowrocket URI and QR output. The default listener is **TCP 443**, configurable to **TCP 8443** or another port. Certificate issuance and renewal use **HTTP-01 on TCP 80**.
 
-Installer revision: `2026-10-18.3`.
+Installer revision: `2026-10-18.4`.
 
 ## Installation
 
@@ -178,6 +178,36 @@ df -h / /var/log
 `rss` is KiB for the main process. `MemoryCurrent` is cgroup memory in bytes and can include more than process RSS; it may be unavailable if memory accounting is disabled. Inspect `trojan-fallback.service` separately if needed. Journal/disk growth is a separate issue from a proxy heap leak; the installer uses the host's journald retention policy.
 
 If memory keeps growing, save the version, workload, PID/uptime, samples and redacted logs before restarting. Prefer a maintained core/fix or enough VM memory for legitimate load. Restart the affected service only as a temporary mitigation, accepting interrupted connections. Neither a hard memory limit nor restarting before OOM repairs a leak; an arbitrary low limit can cause outages. This repository does not impose a fixed memory ceiling or install periodic restart jobs. Local functional tests do not replace a multi-day test on your VM.
+
+## Coexistence and unified installation
+
+The [unified installer](https://github.com/sxmad/mofatizi-installer) offers `1: all`, `2: trojan`, `3: hysteria2`, supports separate domains/ports/password files, and preserves existing configurations unless `--reinstall` is explicitly supplied.
+
+Trojan TCP 443 can coexist with Hysteria UDP 443 or UDP 8443. The updated Hysteria installer uses HTTP-01 on TCP 80 and enables no extra TCP HTTPS page by default. The two installers/renewal jobs serialize certificate work using `/run/lock/trojan-cert-renew.lock`, retaining compatibility with legacy Trojan renewal jobs. Do not delete that shared lock while either protocol is operating. Each protocol owns its own certificate, credentials and service; uninstalling one leaves the other intact.
+
+Older Hysteria deployments may still use TCP 443 for TLS-ALPN and their HTTPS page. Adding Trojan on TCP 8443 works alongside that setup. If the requested TCP port is occupied, the installer stops with a diagnostic; it does not stop Hysteria to take its port. Explicitly migrating/reinstalling legacy Hysteria with the same domain, UDP port and password can free TCP 443, with a brief Hysteria interruption.
+
+### Preserve a password when moving VMs
+
+Keep the original domain/SNI, TCP port and password; point the domain A record to the new VM and obtain a valid certificate there. Clients configured with the domain normally do not need editing. DNS caches and existing connections mean this is not a zero-interruption move. Allow TCP 80 and the selected Trojan port on the new VM.
+
+```bash
+sudo bash -c '
+set -e
+IFS= read -r -s -p "Original Trojan password: " trojan_password
+printf "\n"
+[[ -n "$trojan_password" ]] || exit 1
+printf "%s\n" "$trojan_password" |
+  bash <(curl -fsSL --proto "=https" --tlsv1.2 \
+    https://raw.githubusercontent.com/sxmad/trojan-installer/main/install.sh) install \
+    --domain trojan.example.com \
+    --email you@example.com \
+    --port 443 \
+    --password-stdin
+'
+```
+
+An empty explicitly supplied password is rejected, never replaced with a random password. Without `--password-stdin`, a fresh install/reinstall generates a new password.
 
 ## Troubleshooting
 

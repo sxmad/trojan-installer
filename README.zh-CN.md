@@ -4,7 +4,7 @@
 
 面向 Google Cloud x86_64 Debian/Ubuntu VM 的 Trojan-GFW 安装器，生成 Shadowrocket 可导入的链接和二维码。默认使用 **TCP 443**，可指定 **TCP 8443**；证书签发和续期统一使用 **HTTP-01 / TCP 80**。
 
-安装器修订号：`2026-10-18.3`。
+安装器修订号：`2026-10-18.4`。
 
 ## 安装
 
@@ -178,6 +178,36 @@ df -h / /var/log
 `rss` 是主进程常驻内存，单位 KiB；`MemoryCurrent` 是 cgroup 内存，单位字节，可能包含 RSS 以外的占用，关闭内存记账时可能无法读取。必要时单独检查 `trojan-fallback.service`。日志/磁盘增长与代理堆内存泄漏是不同问题，本安装器沿用宿主机 journald 保留策略。
 
 如果内存持续增长，先保存核心版本、负载、PID/运行时长、采样数据及脱敏日志，再考虑重启。优先采用维护中的核心/修复版本，或为正常负载提供足够的 VM 内存。只在必要时重启对应服务作为临时缓解，并接受连接中断。硬性内存上限或提前重启都不是泄漏修复；随意设置过低上限可能造成掉线。仓库不默认设置固定内存上限或定时重启任务。本机功能测试不能代替你的 VM 上连续多天运行测试。
+
+## 共存与统一入口
+
+[统一安装器](https://github.com/sxmad/mofatizi-installer)提供 `1: all`、`2: trojan`、`3: hysteria2` 菜单，可分别指定域名、端口和密码文件；默认保留已有配置，显式使用 `--reinstall` 才覆盖。
+
+Trojan TCP 443 可与 HY2 UDP 443 或 UDP 8443 共存。新版 HY2 改用 TCP 80 HTTP-01，默认不额外开启 TCP HTTPS 页面。两个安装器及续期任务共用 `/run/lock/trojan-cert-renew.lock`，也能与旧 Trojan 续期任务协调。运行期间不要删除该锁。证书、密码、服务分别管理，卸载一个不会删除另一个。
+
+旧 HY2 部署可能仍占用 TCP 443 做 TLS-ALPN 与 HTTPS 页面，此时可加装 Trojan TCP 8443。指定的 TCP 端口被占用时会明确中断，不会停止 HY2 抢端口。如需释放旧 HY2 的 TCP 443，应显式使用新版重新安装 HY2，保留原域名、UDP 端口和密码，并接受短暂中断。
+
+### 换 VM 保留密码
+
+保持原域名/SNI、TCP 端口和密码，把 A 记录改到新 VM 并申请有效证书。客户端使用域名时通常无需改配置；DNS 缓存与现有连接仍可能导致短暂中断。新 VM 需放行 TCP 80 和所选 Trojan 端口。
+
+```bash
+sudo bash -c '
+set -e
+IFS= read -r -s -p "原 Trojan 密码: " trojan_password
+printf "\n"
+[[ -n "$trojan_password" ]] || exit 1
+printf "%s\n" "$trojan_password" |
+  bash <(curl -fsSL --proto "=https" --tlsv1.2 \
+    https://raw.githubusercontent.com/sxmad/trojan-installer/main/install.sh) install \
+    --domain trojan.example.com \
+    --email you@example.com \
+    --port 443 \
+    --password-stdin
+'
+```
+
+显式密码为空时拒绝安装，不会替换成随机密码；未指定 `--password-stdin` 的安装/重装仍会生成新密码。
 
 ## 排错
 

@@ -5,7 +5,7 @@ IFS=$'\n\t'
 umask 077
 
 readonly SCRIPT_NAME="trojan-installer"
-readonly SCRIPT_VERSION="2026-10-18.3"
+readonly SCRIPT_VERSION="2026-10-18.4"
 readonly VERIFIED_TROJAN_VERSION="1.16.0"
 readonly VERIFIED_TROJAN_SHA256="daad1ab6edd3f89066c5e1f42c6618b2f8cb59b7ba375dfb043d0c62c9e254ea"
 readonly RELEASE_API="https://api.github.com/repos/trojan-gfw/trojan/releases"
@@ -26,6 +26,9 @@ readonly BACKUP_DIR="/var/backups/trojan-installer"
 readonly RENEW_SCRIPT="/usr/local/sbin/trojan-renew-cert"
 readonly RENEW_SERVICE="trojan-cert-renew.service"
 readonly RENEW_TIMER="trojan-cert-renew.timer"
+# Reuse the legacy Trojan renewal lock so older deployments also coordinate
+# with the Hysteria installer/renewal job on the same host.
+readonly ACME_LOCK="/run/lock/trojan-cert-renew.lock"
 
 ACTION="install"
 DOMAIN=""
@@ -178,6 +181,7 @@ validate_inputs() {
   validate_requested_version
   if (( PASSWORD_FROM_STDIN )); then
     IFS= read -r PASSWORD || die "未从标准输入读取到密码，已取消。"
+    [[ -n "${PASSWORD}" ]] || die "指定的密码不能为空；已取消，未生成替代密码。"
   fi
   if [[ -z "${PASSWORD}" ]]; then
     PASSWORD="$(openssl rand -hex 8)"
@@ -583,11 +587,23 @@ cert_valid() {
 }
 
 obtain_certificate() {
+  if ! cert_valid; then CERT_CREATED=1; fi
+  (
+    exec 9>"${ACME_LOCK}"
+    flock -w 300 9 || die "等待另一协议的证书操作超时，请稍后重试。"
+    obtain_certificate_locked
+  )
+}
+
+obtain_certificate_locked() {
   install -d -o root -g root -m 0700 "${LEGO_DIR}"
   if cert_valid; then
     info "复用仍有效的 Let’s Encrypt 证书。"
     sync_certificate
     return 0
+  fi
+  if port_in_use 80; then
+    die "TCP 80 已被其他进程占用；HTTP-01 需要此端口，安装器不会停止该进程。"
   fi
   CERT_CREATED=1
   local attempt=0 log="$(mktemp)" status=0 acme_action=run
@@ -646,11 +662,11 @@ render_renewal_script() {
     cert_file "${CERT_FILE}" key_file "${KEY_FILE}" lego_bin "${LEGO_BIN}" \
     config_file "${CONFIG_FILE}" trojan_bin "${BINARY}" \
     pending_file "${STATE_DIR}/certificate-reload.pending" \
-    lock_file /run/lock/trojan-cert-renew.lock
+    lock_file "${ACME_LOCK}"
   # Only the header is expanded here. Runtime variables must remain literal.
   cat <<'EOF'
 exec 9>"${lock_file}"
-flock -n 9 || exit 0
+flock -w 300 9 || { echo 'HTTP-01 lock timeout; retry later' >&2; exit 1; }
 cert="${lego_dir}/certificates/${domain}.crt"
 key="${lego_dir}/certificates/${domain}.key"
 valid_pair() {
@@ -700,7 +716,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-TimeoutStartSec=240s
+TimeoutStartSec=600s
 ExecStart=${RENEW_SCRIPT}
 EOF
   cat >"/etc/systemd/system/${RENEW_TIMER}" <<EOF
@@ -923,9 +939,6 @@ install_trojan() {
   resolve_release
   validate_dns
   confirm_existing
-  if port_in_use 80; then
-    die "TCP 80 已被其他进程占用，HTTP-01 签发和续期需要此端口；安装器不会停止该进程。"
-  fi
   info "请在 GCP 和主机防火墙放行 TCP 80（证书验证）及 TCP ${PORT}（Trojan）。"
   if [[ ! -e "${CONFIG_FILE}" && ! -e "${BINARY}" && \
         ! -e "/etc/systemd/system/${SERVICE}" && \
