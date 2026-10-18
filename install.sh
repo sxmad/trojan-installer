@@ -5,7 +5,7 @@ IFS=$'\n\t'
 umask 077
 
 readonly SCRIPT_NAME="trojan-installer"
-readonly SCRIPT_VERSION="2026-10-02.7"
+readonly SCRIPT_VERSION="2026-10-18.1"
 readonly TROJAN_VERSION="1.16.0"
 readonly TROJAN_TARBALL="trojan-${TROJAN_VERSION}-linux-amd64.tar.xz"
 readonly TROJAN_URL="https://github.com/trojan-gfw/trojan/releases/download/v${TROJAN_VERSION}/${TROJAN_TARBALL}"
@@ -36,11 +36,16 @@ PASSWORD_FROM_STDIN=0
 YES=0
 KEEP_CREDENTIALS=0
 VERSION=""
+PORT=443
+ENABLE_BBR=1
 STATIC_PAGE=1
 CERT_CREATED=0
 BBR_CREATED=0
 BBR_OLD_CC=""
 BBR_OLD_QDISC=""
+BBR_CHANGED=0
+BBR_BEFORE_CC=""
+BBR_BEFORE_QDISC=""
 LEGO_BIN=""
 USER_PREEXISTED=1
 BINARY_PREEXISTED=1
@@ -81,6 +86,8 @@ Usage:
 Install options:
   --domain DOMAIN       TLS certificate domain (no default; prompt if omitted)
   --email EMAIL         ACME email (no default; prompt if omitted)
+  --port PORT           Trojan TCP port (default: 443; e.g. 8443)
+  --no-bbr              Leave existing TCP congestion-control settings unchanged
   --password-stdin      Read a custom 12-128-character password from stdin
   --version VERSION     Only the pinned official version v1.16.0 is supported
   --no-page             Do not create the local HTTPS fallback page
@@ -88,8 +95,8 @@ Install options:
   --keep-credentials    Keep generated URI/QR files and the current config backup on uninstall
   -h, --help            Show this help
 
-The installer uses the official Trojan-GFW v1.16.0 binary, TCP 443, a
-Let's Encrypt TLS-ALPN-01 certificate, and a local Python static fallback.
+The installer uses the official Trojan-GFW v1.16.0 binary, a configurable TCP
+port, a Let's Encrypt HTTP-01 certificate (TCP 80), and a local Python fallback.
 It does not install Nginx, Docker, panels, or third-party scripts. Trojan clients
 use a TCP/TLS connection; UDP 443 is not required.
 EOF
@@ -106,6 +113,8 @@ parse_args() {
       start|stop|restart|status) ACTION="${arg}" ;;
       --domain) (($# >= 2)) || die "--domain 需要参数。"; DOMAIN="$2"; shift ;;
       --email) (($# >= 2)) || die "--email 需要参数。"; EMAIL="$2"; shift ;;
+      --port) (($# >= 2)) || die "--port 需要参数。"; PORT="$2"; shift ;;
+      --no-bbr) ENABLE_BBR=0 ;;
       --password-stdin) PASSWORD_FROM_STDIN=1 ;;
       --version) (($# >= 2)) || die "--version 需要参数。"; VERSION="$2"; shift ;;
       --no-page|--no-masquerade) STATIC_PAGE=0 ;;
@@ -162,6 +171,7 @@ validate_identity() {
 
 validate_inputs() {
   validate_identity
+  validate_port
   if [[ -n "${VERSION}" && "${VERSION}" != "v${TROJAN_VERSION}" ]]; then
     die "当前安装器只支持官方 Trojan-GFW v${TROJAN_VERSION}。"
   fi
@@ -172,6 +182,46 @@ validate_inputs() {
   PASSWORD="$(openssl rand -hex 8)"
   fi
   [[ "${PASSWORD}" =~ ^[A-Za-z0-9._-]{12,128}$ ]] || die "密码必须为 12-128 位，只能包含字母、数字、点、下划线或短横线。"
+}
+
+validate_port() {
+  [[ "${PORT}" =~ ^[0-9]{1,5}$ ]] || die "端口必须为 1-65535 的十进制整数。"
+  PORT=$((10#${PORT}))
+  ((PORT >= 1 && PORT <= 65535)) || die "端口必须在 1-65535 之间。"
+  ((PORT != 80 && PORT != FALLBACK_PORT)) || die "端口 80 用于 HTTP-01，${FALLBACK_PORT} 用于本地回落；请选择其他端口。"
+}
+
+load_installed_port() {
+  PORT="$(python3 - "${1:-${CONFIG_FILE}}" <<'PY'
+import json, sys
+with open(sys.argv[1]) as f:
+    port = json.load(f)["local_port"]
+if type(port) is not int:
+    raise SystemExit("local_port must be an integer")
+print(port)
+PY
+)" || die "无法读取已安装配置的监听端口。"
+  validate_port
+}
+
+validate_dns() {
+  # getent ahostsv6 may synthesize IPv4-mapped addresses or hide AAAA results
+  # through AI_ADDRCONFIG. Query each family explicitly without those flags.
+  python3 - "${DOMAIN}" <<'PY'
+import socket, sys
+domain = sys.argv[1]
+try:
+    socket.getaddrinfo(domain, None, socket.AF_INET, socket.SOCK_STREAM, 0, 0)
+except socket.gaierror as exc:
+    raise SystemExit(f"无法解析 {domain} 的 A 记录，请检查 DNS：{exc}")
+try:
+    socket.getaddrinfo(domain, None, socket.AF_INET6, socket.SOCK_STREAM, 0, 0)
+except socket.gaierror as exc:
+    if exc.errno not in (socket.EAI_NONAME, getattr(socket, 'EAI_NODATA', socket.EAI_NONAME)):
+        raise SystemExit(f"无法确认 {domain} 的 AAAA 记录，请检查 DNS：{exc}")
+else:
+    raise SystemExit(f"{domain} 存在 AAAA 记录；此安装器只监听 IPv4，请先移除 AAAA。")
+PY
 }
 
 check_platform() {
@@ -191,6 +241,7 @@ install_prerequisites() {
   command -v lego >/dev/null 2>&1 || packages+=(lego)
   command -v python3 >/dev/null 2>&1 || packages+=(python3)
   command -v sysctl >/dev/null 2>&1 || packages+=(procps)
+  if ((ENABLE_BBR)) && ! command -v modprobe >/dev/null 2>&1; then packages+=(kmod); fi
   command -v flock >/dev/null 2>&1 || packages+=(util-linux)
   command -v tar >/dev/null 2>&1 || packages+=(tar)
   command -v xz >/dev/null 2>&1 || packages+=(xz-utils)
@@ -210,32 +261,46 @@ install_prerequisites() {
 }
 
 configure_bbr() {
+  ((ENABLE_BBR)) || { info "已跳过 BBR；保留现有 TCP 设置。"; return 0; }
   command -v sysctl >/dev/null 2>&1 || { warn "未找到 sysctl，跳过 BBR。"; return 0; }
-  [[ -r /proc/sys/net/ipv4/tcp_available_congestion_control ]] || { warn "内核未提供拥塞控制列表，跳过 BBR。"; return 0; }
-  grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control || {
-    warn "当前内核不支持 BBR，继续使用系统默认 TCP 拥塞控制。"
-    return 0
-  }
-  local conf=/etc/sysctl.d/99-trojan-installer-bbr.conf
+  local conf="${1:-/etc/sysctl.d/99-trojan-installer-bbr.conf}" created=0
   if [[ -e "${conf}" ]] && ! grep -q 'Managed by trojan-installer' "${conf}"; then
     warn "${conf} 已由其他配置管理，跳过覆盖。"
     return 0
   fi
+  if ! sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null | grep -qw bbr; then
+    if command -v modprobe >/dev/null 2>&1; then modprobe tcp_bbr >/dev/null 2>&1 || true; fi
+  fi
+  if ! sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null | grep -qw bbr; then
+    warn "当前内核无法提供 BBR，保留原有 TCP 拥塞控制；不会安装或更换内核。"
+    return 0
+  fi
+  BBR_BEFORE_CC="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)"
+  BBR_BEFORE_QDISC="$(sysctl -n net.core.default_qdisc 2>/dev/null || true)"
+  [[ -n "${BBR_BEFORE_CC}" && -n "${BBR_BEFORE_QDISC}" ]] || { warn "无法读取现有 TCP 设置，跳过 BBR。"; return 0; }
+  if command -v modprobe >/dev/null 2>&1; then modprobe sch_fq >/dev/null 2>&1 || true; fi
   if [[ ! -e "${conf}" ]]; then
-    BBR_OLD_CC="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)"
-    BBR_OLD_QDISC="$(sysctl -n net.core.default_qdisc 2>/dev/null || true)"
+    created=1
     cat >"${conf}" <<'EOF'
 # Managed by trojan-installer: use BBR when the kernel supports it.
 net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=bbr
 EOF
     chmod 0644 "${conf}"
-    BBR_CREATED=1
   fi
   if sysctl -p "${conf}" >/dev/null 2>&1 && [[ "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)" == bbr ]]; then
-    info "已启用内核 BBR（Trojan 使用 TCP）。"
+    BBR_CHANGED=1
+    if ((created)); then
+      BBR_CREATED=1
+      BBR_OLD_CC="${BBR_BEFORE_CC}"
+      BBR_OLD_QDISC="${BBR_BEFORE_QDISC}"
+    fi
+    info "已启用内核 TCP BBR；仅影响新建 TCP 连接，不保证固定幅度的提速。"
   else
-    warn "BBR 配置文件已写入，但当前内核未能切换到 bbr；继续安装。"
+    sysctl -w "net.ipv4.tcp_congestion_control=${BBR_BEFORE_CC}" >/dev/null 2>&1 || true
+    sysctl -w "net.core.default_qdisc=${BBR_BEFORE_QDISC}" >/dev/null 2>&1 || true
+    if ((created)); then rm -f "${conf}"; fi
+    warn "BBR 切换失败，已尝试恢复原有 TCP 设置；继续安装。"
   fi
 }
 
@@ -247,6 +312,7 @@ write_state() {
   [[ -z "${BINARY_BACKUP}" ]] || printf 'binary_backup=%s\n' "${BINARY_BACKUP}" >>"${STATE_FILE}"
   [[ -z "${INSTALL_BACKUP_DIR}" ]] || printf 'backup_dir=%s\n' "${INSTALL_BACKUP_DIR}" >>"${STATE_FILE}"
   chmod 0600 "${STATE_FILE}"
+  printf 'port=%s\n' "${PORT}" >>"${STATE_FILE}"
 }
 
 backup_existing() {
@@ -368,14 +434,12 @@ EOF
   fi
 }
 
-write_config() {
-  install -d -o root -g trojan -m 0750 "${CONFIG_DIR}"
-  local tmp="${CONFIG_FILE}.tmp.$$"
-  cat >"${tmp}" <<EOF
+render_config() {
+  cat <<EOF
 {
     "run_type": "server",
     "local_addr": "0.0.0.0",
-    "local_port": 443,
+    "local_port": ${PORT},
     "remote_addr": "127.0.0.1",
     "remote_port": ${FALLBACK_PORT},
     "password": ["${PASSWORD}"],
@@ -406,6 +470,12 @@ write_config() {
     "mysql": {"enabled": false}
 }
 EOF
+}
+
+write_config() {
+  install -d -o root -g trojan -m 0750 "${CONFIG_DIR}"
+  local tmp="${CONFIG_FILE}.tmp.$$"
+  render_config >"${tmp}"
   chown root:trojan "${tmp}"
   chmod 0640 "${tmp}"
   mv -f "${tmp}" "${CONFIG_FILE}"
@@ -425,7 +495,8 @@ cert_valid() {
   local cert="${LEGO_DIR}/certificates/${DOMAIN}.crt" key="${LEGO_DIR}/certificates/${DOMAIN}.key" cert_pub key_pub
   [[ -s "${cert}" && -s "${key}" ]] || return 1
   openssl x509 -in "${cert}" -noout -checkend 2592000 >/dev/null 2>&1 || return 1
-  openssl x509 -in "${cert}" -noout -checkhost "${DOMAIN}" >/dev/null 2>&1 || return 1
+  # x509 -checkhost may return success even on a hostname mismatch.
+  openssl verify -trusted "${cert}" -partial_chain -verify_hostname "${DOMAIN}" "${cert}" >/dev/null 2>&1 || return 1
   cert_pub="$(openssl x509 -in "${cert}" -pubkey -noout | openssl pkey -pubin -outform DER 2>/dev/null | sha256sum)" || return 1
   key_pub="$(openssl pkey -in "${key}" -pubout 2>/dev/null | openssl pkey -pubin -outform DER 2>/dev/null | sha256sum)" || return 1
   [[ -n "${cert_pub}" && "${cert_pub}" == "${key_pub}" ]]
@@ -446,16 +517,16 @@ obtain_certificate() {
   while ((attempt < 3)); do
     ((attempt += 1))
     if [[ "${acme_action}" == renew ]]; then
-      info "续期 Let’s Encrypt TLS-ALPN-01 证书（第 ${attempt}/3 次，需要 TCP 443）..."
+      info "续期 Let’s Encrypt HTTP-01 证书（第 ${attempt}/3 次，需要 TCP 80）..."
     else
-      info "申请 Let’s Encrypt TLS-ALPN-01 证书（第 ${attempt}/3 次，需要 TCP 443）..."
+      info "申请 Let’s Encrypt HTTP-01 证书（第 ${attempt}/3 次，需要 TCP 80）..."
     fi
     status=0
     if [[ "${acme_action}" == renew ]]; then
-      timeout 180s "${LEGO_BIN}" --path "${LEGO_DIR}" --domains "${DOMAIN}" --tls renew --days 30 >"${log}" 2>&1 || status=$?
+      timeout 180s "${LEGO_BIN}" --path "${LEGO_DIR}" --domains "${DOMAIN}" --http renew --days 30 >"${log}" 2>&1 || status=$?
     else
       timeout 180s "${LEGO_BIN}" --accept-tos --path "${LEGO_DIR}" --email "${EMAIL}" \
-        --domains "${DOMAIN}" --tls run >"${log}" 2>&1 || status=$?
+        --domains "${DOMAIN}" --http run >"${log}" 2>&1 || status=$?
     fi
     if ((status == 0)) && cert_valid; then
       cat "${log}"
@@ -483,45 +554,57 @@ obtain_certificate() {
   done
 }
 
-write_renewal_service() {
-  [[ -n "${LEGO_BIN}" && -x "${LEGO_BIN}" ]] || die "未找到 lego，可先执行 apt-get install lego。"
-  cat >"${RENEW_SCRIPT}" <<EOF
-#!/usr/bin/env bash
-set -Eeuo pipefail
-domain='${DOMAIN}'
-lego_dir='${LEGO_DIR}'
-cert_file='${CERT_FILE}'
-key_file='${KEY_FILE}'
-lego_bin='${LEGO_BIN}'
-exec 9>/run/lock/trojan-cert-renew.lock
+render_renewal_script() {
+  printf '#!/usr/bin/env bash\nset -Eeuo pipefail\numask 077\n'
+  printf '%s=%q\n' domain "${DOMAIN}" lego_dir "${LEGO_DIR}" \
+    cert_file "${CERT_FILE}" key_file "${KEY_FILE}" lego_bin "${LEGO_BIN}" \
+    config_file "${CONFIG_FILE}" trojan_bin "${BINARY}" \
+    pending_file "${STATE_DIR}/certificate-reload.pending" \
+    lock_file /run/lock/trojan-cert-renew.lock
+  # Only the header is expanded here. Runtime variables must remain literal.
+  cat <<'EOF'
+exec 9>"${lock_file}"
 flock -n 9 || exit 0
-cert="\${lego_dir}/certificates/\${domain}.crt"
-if [[ -s "\${cert}" ]] && openssl x509 -in "\${cert}" -noout -checkend 2592000 >/dev/null 2>&1; then
+cert="${lego_dir}/certificates/${domain}.crt"
+key="${lego_dir}/certificates/${domain}.key"
+valid_pair() {
+  local seconds="$1" cert_pub key_pub
+  [[ -s "${cert}" && -s "${key}" ]] || return 1
+  openssl x509 -in "${cert}" -noout -checkend "${seconds}" >/dev/null 2>&1 || return 1
+  openssl verify -trusted "${cert}" -partial_chain -verify_hostname "${domain}" "${cert}" >/dev/null 2>&1 || return 1
+  cert_pub="$(openssl x509 -in "${cert}" -pubkey -noout | openssl pkey -pubin -outform DER 2>/dev/null | sha256sum)" || return 1
+  key_pub="$(openssl pkey -in "${key}" -pubout 2>/dev/null | openssl pkey -pubin -outform DER 2>/dev/null | sha256sum)" || return 1
+  [[ -n "${cert_pub}" && "${cert_pub}" == "${key_pub}" ]]
+}
+if ! valid_pair 2592000; then
+  # HTTP-01 always uses TCP 80, independent of the Trojan listener port.
+  # Never stop Trojan (or a coexisting HY2 instance) to renew a certificate.
+  timeout 180s "${lego_bin}" --path "${lego_dir}" --domains "${domain}" --http renew --days 30
+fi
+valid_pair 0 || { echo 'trojan-cert-renew: invalid certificate/key; keeping deployed files' >&2; exit 1; }
+if cmp -s "${cert}" "${cert_file}" && cmp -s "${key}" "${key_file}" && [[ ! -e "${pending_file}" ]]; then
   exit 0
 fi
-restart=0
+# Also retry deployment when lego already renewed but a previous copy/reload failed.
+touch "${pending_file}"
+trap 'rm -f "${cert_file}.new" "${key_file}.new"' EXIT
+install -o root -g trojan -m 0644 "${cert}" "${cert_file}.new"
+install -o root -g trojan -m 0640 "${key}" "${key_file}.new"
+mv -f "${cert_file}.new" "${cert_file}"
+mv -f "${key_file}.new" "${key_file}"
+"${trojan_bin}" -t -c "${config_file}"
 if systemctl is-active --quiet trojan.service; then
-  systemctl stop trojan.service
-  restart=1
+  # ExecReload sends SIGUSR1: existing sessions retain their SSL context.
+  systemctl reload trojan.service
 fi
-restore() {
-  local rc=$?
-  trap - EXIT
-  if ((restart)); then
-    if ! systemctl start trojan.service || ! systemctl is-active --quiet trojan.service; then
-      echo 'trojan-cert-renew: failed to restore trojan.service' >&2
-      rc=1
-    fi
-  fi
-  exit "${rc}"
-}
-trap restore EXIT
-timeout 180s "\${lego_bin}" --path "\${lego_dir}" --domains "\${domain}" --tls renew --days 30
-install -o root -g trojan -m 0644 "\${lego_dir}/certificates/\${domain}.crt" "\${cert_file}.new"
-install -o root -g trojan -m 0640 "\${lego_dir}/certificates/\${domain}.key" "\${key_file}.new"
-mv -f "\${cert_file}.new" "\${cert_file}"
-mv -f "\${key_file}.new" "\${key_file}"
+rm -f "${pending_file}"
 EOF
+}
+
+write_renewal_service() {
+  [[ -n "${LEGO_BIN}" && -x "${LEGO_BIN}" ]] || die "未找到 lego，可先执行 apt-get install lego。"
+  render_renewal_script >"${RENEW_SCRIPT}"
+  bash -n "${RENEW_SCRIPT}"
   chmod 0750 "${RENEW_SCRIPT}"
   cat >"/etc/systemd/system/${RENEW_SERVICE}" <<EOF
 [Unit]
@@ -592,19 +675,32 @@ EOF
 config_test() { "${BINARY}" -t -c "${CONFIG_FILE}" >/dev/null; }
 
 port_ready() {
-  ss -H -ltnp 2>/dev/null | awk -v p=":443" '$1=="LISTEN" && ($4 ~ (p "$" ) || $5 ~ (p "$")) && /trojan/ {ok=1} END{exit !ok}'
+  local pid
+  pid="$(systemctl show --property MainPID --value "${SERVICE}")"
+  [[ "${pid}" =~ ^[1-9][0-9]*$ ]] || return 1
+  ss -H -ltnp "sport = :${PORT}" 2>/dev/null | awk -v pid="${pid}" '$1=="LISTEN" && $0 ~ ("pid=" pid ",") {ok=1} END{exit !ok}'
+}
+
+port_in_use() {
+  local listeners
+  listeners="$(ss -H -ltn "sport = :$1")" || die "无法检查 TCP $1 监听状态。"
+  [[ -n "${listeners}" ]]
 }
 
 service_diagnostics() {
   warn "最近的 Trojan 服务日志："
   journalctl -u "${SERVICE}" -n 80 --no-pager >&2 || true
-  warn "请确认域名、TCP 443、防火墙目标和证书权限。"
+  warn "请确认域名、TCP ${PORT}、防火墙目标和证书权限；ACME 需要 TCP 80。"
 }
 
 restore_previous_install() {
   local rc=$? path backup_path
   trap - EXIT
   if ((INSTALL_RESTORE)); then
+    if ((BBR_CHANGED)); then
+      sysctl -w "net.ipv4.tcp_congestion_control=${BBR_BEFORE_CC}" >/dev/null 2>&1 || true
+      sysctl -w "net.core.default_qdisc=${BBR_BEFORE_QDISC}" >/dev/null 2>&1 || true
+    fi
     systemctl stop "${SERVICE}" "${FALLBACK_SERVICE}" >/dev/null 2>&1 || true
     if [[ -n "${INSTALL_BACKUP_DIR}" ]]; then
       for path in "${CONFIG_FILE}" "${CERT_FILE}" "${KEY_FILE}"; do rm -f "${path}"; done
@@ -665,15 +761,15 @@ local_selftest() (
   trap cleanup EXIT
   if ((STATIC_PAGE)); then
     code="$(curl -q --proto '=https' --tlsv1.2 --noproxy '*' --silent --show-error \
-      --connect-timeout 5 --max-time 15 --resolve "${DOMAIN}:443:127.0.0.1" \
-      --output "${dir}/page" --write-out '%{http_code}' "https://${DOMAIN}/" 2>"${dir}/https.log")" || true
+      --connect-timeout 5 --max-time 15 --resolve "${DOMAIN}:${PORT}:127.0.0.1" \
+      --output "${dir}/page" --write-out '%{http_code}' "https://${DOMAIN}:${PORT}/" 2>"${dir}/https.log")" || true
     [[ "${code}" == 200 ]] && grep -Fq '<body>asdfq</body>' "${dir}/page" || { warn "本机 HTTPS 静态页自测失败（HTTP ${code}）。"; cat "${dir}/https.log" >&2 || true; return 1; }
   fi
   client_port=$((22000 + RANDOM % 20000))
   cat >"${dir}/client.json" <<EOF
 {
   "run_type":"client", "local_addr":"127.0.0.1", "local_port":${client_port},
-  "remote_addr":"127.0.0.1", "remote_port":443, "password":["${PASSWORD}"], "log_level":1,
+  "remote_addr":"127.0.0.1", "remote_port":${PORT}, "password":["${PASSWORD}"], "log_level":1,
   "ssl":{"verify":true,"verify_hostname":true,"cert":"/etc/ssl/certs/ca-certificates.crt","sni":"${DOMAIN}","alpn":["http/1.1"],"reuse_session":true,"session_ticket":false},
   "tcp":{"prefer_ipv4":true,"no_delay":true,"keep_alive":true}
 }
@@ -692,22 +788,27 @@ EOF
   info "本机 Trojan TLS、认证、SOCKS 和 Google HTTP 204 自测通过。"
 )
 
-print_connection() {
-  local encoded uri out="/root/trojan-${DOMAIN}.txt" png="/root/trojan-${DOMAIN}.png"
+connection_uri() {
+  local encoded
   encoded="$(python3 - "${PASSWORD}" <<'PY'
 import sys, urllib.parse
 print(urllib.parse.quote(sys.argv[1], safe=''))
 PY
 )"
-  uri="trojan://${encoded}@${DOMAIN}:443?peer=${DOMAIN}&allowInsecure=0#trojan"
-  printf 'Trojan\nDomain: %s\nPort: 443 (TCP)\nPassword: %s\nSNI/Peer: %s\nURI: %s\n' "${DOMAIN}" "${PASSWORD}" "${DOMAIN}" "${uri}" >"${out}"
+  printf 'trojan://%s@%s:%s?peer=%s&allowInsecure=0#trojan\n' "${encoded}" "${DOMAIN}" "${PORT}" "${DOMAIN}"
+}
+
+print_connection() {
+  local uri out="/root/trojan-${DOMAIN}.txt" png="/root/trojan-${DOMAIN}.png"
+  uri="$(connection_uri)"
+  printf 'Trojan\nDomain: %s\nPort: %s (TCP)\nPassword: %s\nSNI/Peer: %s\nURI: %s\n' "${DOMAIN}" "${PORT}" "${PASSWORD}" "${DOMAIN}" "${uri}" >"${out}"
   chmod 0600 "${out}"
   info ""
   info "Trojan 安装、本机 HTTPS 页面和代理自测通过。"
   warn "公网客户端连通性仍需在 Shadowrocket 中实际验证。"
   info "域名: ${DOMAIN}"
-  info "端口: 443（TCP/TLS）"
-  ((STATIC_PAGE)) && info "静态页: https://${DOMAIN}/"
+  info "端口: ${PORT}（TCP/TLS）"
+  ((STATIC_PAGE)) && info "静态页: https://${DOMAIN}:${PORT}/"
   info "密码: ${PASSWORD}"
   info "SNI/Peer: ${DOMAIN}"
   info "Shadowrocket URI（可手动导入）："
@@ -727,15 +828,17 @@ install_trojan() {
   info "安装器版本：${SCRIPT_VERSION}（Trojan-GFW v${TROJAN_VERSION}）"
   collect_identity
   validate_identity
+  validate_port
   install_prerequisites
   require_command curl; require_command openssl; require_command lego; require_command python3; require_command ss; require_command systemctl
   LEGO_BIN="$(command -v lego)"
   validate_inputs
-  getent ahostsv4 "${DOMAIN}" >/dev/null 2>&1 || die "当前 VM 无法解析 ${DOMAIN}；请先配置 A 记录并等待 DNS 生效。"
-  if getent ahostsv6 "${DOMAIN}" >/dev/null 2>&1; then
-    die "${DOMAIN} 存在 AAAA 记录，但此安装器只监听 IPv4；请删除错误 AAAA 或先配置可用 IPv6。"
-  fi
+  validate_dns
   confirm_existing
+  if port_in_use 80; then
+    die "TCP 80 已被其他进程占用，HTTP-01 签发和续期需要此端口；安装器不会停止该进程。"
+  fi
+  info "请在 GCP 和主机防火墙放行 TCP 80（证书验证）及 TCP ${PORT}（Trojan）。"
   if [[ ! -e "${CONFIG_FILE}" && ! -e "${BINARY}" && \
         ! -e "/etc/systemd/system/${SERVICE}" && \
         ! -e "/etc/systemd/system/${FALLBACK_SERVICE}" && \
@@ -774,10 +877,10 @@ install_trojan() {
     BBR_OLD_QDISC="$(sed -n 's/^bbr_old_qdisc=//p' "${STATE_FILE}" | head -n1)"
   fi
   write_state
-  if ss -H -ltnp 2>/dev/null | awk '$1=="LISTEN" && ($4 ~ /:443$/ || $5 ~ /:443$/) {found=1} END{exit !found}'; then
-    die "TCP 443 已被其他进程占用；请先检查 ss -ltnp 并释放端口。"
+  if port_in_use "${PORT}"; then
+    die "TCP ${PORT} 已被其他进程占用；请检查 ss -ltnp 或使用 --port 8443。"
   fi
-  if ss -H -ltnp 2>/dev/null | awk '$1=="LISTEN" && ($4 ~ /:18080$/ || $5 ~ /:18080$/) {found=1} END{exit !found}'; then
+  if port_in_use "${FALLBACK_PORT}"; then
     die "本机回落端口 18080 已被其他进程占用；请先检查 ss -ltnp 并释放端口。"
   fi
   download_binary
@@ -796,8 +899,8 @@ install_trojan() {
   systemctl start "${FALLBACK_SERVICE}"
   systemctl start "${SERVICE}" || { service_diagnostics; die "Trojan 服务启动失败；未生成连接信息。"; }
   sleep 1
-  if ! systemctl is-active --quiet "${SERVICE}" || ! port_ready; then service_diagnostics; systemctl stop "${SERVICE}" || true; die "Trojan 未稳定监听 TCP 443；未生成连接信息。"; fi
-  if ! local_selftest; then die "本机 Trojan 功能自测未通过；服务和配置已保留，未生成连接信息。"; fi
+  if ! systemctl is-active --quiet "${SERVICE}" || ! port_ready; then service_diagnostics; systemctl stop "${SERVICE}" || true; die "Trojan 未稳定监听 TCP ${PORT}；未生成连接信息。"; fi
+  if ! local_selftest; then die "本机 Trojan 功能自测未通过；将尝试回滚本次安装，未生成连接信息。"; fi
   write_state
   if ! systemctl enable --now "${RENEW_TIMER}" >/dev/null; then
     warn "证书自动续期 timer 启动失败；Trojan 服务已可用，请稍后检查 ${RENEW_TIMER}。"
@@ -810,6 +913,7 @@ install_trojan() {
 update_trojan() {
   require_root; check_platform
   [[ -x "${BINARY}" && -s "${CONFIG_FILE}" ]] || die "未找到已安装的 Trojan 程序和配置；请先执行 install。"
+  load_installed_port
   backup_existing
   download_binary
   if ! config_test; then
@@ -826,7 +930,7 @@ update_trojan() {
     if ! systemctl is-active --quiet "${SERVICE}" || ! port_ready; then
       [[ -s "${BINARY_BACKUP}" ]] && cp -p "${BINARY_BACKUP}" "${BINARY}"
       systemctl restart "${SERVICE}" || true
-      die "更新后 Trojan 未稳定监听 TCP 443，已尝试恢复旧二进制。"
+      die "更新后 Trojan 未稳定监听 TCP ${PORT}，已尝试恢复旧二进制。"
     fi
     info "更新完成；已保留现有配置和密码，请使用现有客户端验证。"
   else
@@ -851,6 +955,7 @@ uninstall_trojan() {
   systemctl disable --now "${SERVICE}" >/dev/null 2>&1 || true
   systemctl disable --now "${FALLBACK_SERVICE}" >/dev/null 2>&1 || true
   systemctl disable --now "${RENEW_TIMER}" >/dev/null 2>&1 || true
+  systemctl stop "${RENEW_SERVICE}" >/dev/null 2>&1 || true
   rm -f "/etc/systemd/system/${SERVICE}" "/etc/systemd/system/${FALLBACK_SERVICE}" \
     "/etc/systemd/system/${RENEW_SERVICE}" "/etc/systemd/system/${RENEW_TIMER}" "${RENEW_SCRIPT}"
   systemctl daemon-reload
@@ -898,4 +1003,6 @@ main() {
   esac
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi
