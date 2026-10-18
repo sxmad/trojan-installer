@@ -4,7 +4,7 @@
 
 Trojan-GFW installer for x86_64 Debian/Ubuntu Google Cloud VMs, with Shadowrocket URI and QR output. The default listener is **TCP 443**, configurable to **TCP 8443** or another port. Certificate issuance and renewal use **HTTP-01 on TCP 80**.
 
-Installer revision: `2026-10-18.4`.
+Installer revision: `2026-10-18.5`.
 
 ## Installation
 
@@ -66,7 +66,7 @@ Both the GCP VPC firewall and any host firewall must permit the appropriate traf
 
 If `sxmad/hysteria2-installer` already owns TCP/UDP 443, use Trojan `--port 8443` and allow TCP 80. Prefer a separate Trojan hostname such as `trojan.example.com`. This script does not stop or modify HY2.
 
-HTTP-01 always validates on public TCP 80; changing the proxy port cannot move that challenge to 8443. If another web server owns TCP 80, installation stops with an explanation; webroot and DNS-01 are not implemented. Changing ports alone does not guarantee better performance or reliability.
+HTTP-01 always validates on public TCP 80; changing the proxy port cannot move that challenge to 8443. If another web server owns TCP 80, use `--acme-webroot DIR` after configuring its challenge route; without this option the installer stops before changing the proxy. DNS-01 is not implemented. Changing ports alone does not guarantee better performance or reliability.
 
 Requirements:
 
@@ -263,3 +263,19 @@ References: [Trojan config](https://trojan-gfw.github.io/trojan/config.html) · 
 ## License
 
 MIT
+
+## Existing website on TCP 80
+
+Older Trojan stacks may run Nginx/Apache on TCP 80. A different **proxy** port does not resolve this certificate challenge conflict. First identify the listener:
+
+```bash
+sudo ss -ltnp 'sport = :80'
+```
+
+Add `--acme-webroot /actual/website/root` to the install command only after the existing HTTP server serves `http://YOUR_DOMAIN/.well-known/acme-challenge/TOKEN` from `/actual/website/root/.well-known/acme-challenge/TOKEN`. The path must be an existing absolute directory; the installer does not guess `/var/www/html`, reconfigure a web server, or stop it. Public TCP 80 is still required. An existing virtual host can redirect or reject a new hostname, so an existing directory alone is insufficient.
+
+This mode is saved in the generated renewal script. Keep that directory, HTTP route and permissions working for future renewal. Only new public challenge files/directories use readable permissions; existing website permissions are not changed. ACME account/private key storage remains private. `update` does not retrofit certificate options; a configured reinstall is needed to change the certificate mode, with the original password if keeping clients unchanged.
+
+See the [existing HTTP server and recovery guide](https://github.com/sxmad/mofatizi-installer#existing-http-server-on-port-80) for an Nginx example and recovery after an incomplete install. Do not temporarily stop a web server merely to pass installation: unattended renewal would hit the same conflict later.
+
+Additional regression test: `python3 tests/test_webroot.py`. It exercises issuance and renewal argument/permission handling through a real local HTTP server with a simulated CA client; public ACME still requires a deployment check.

@@ -4,7 +4,7 @@
 
 面向 Google Cloud x86_64 Debian/Ubuntu VM 的 Trojan-GFW 安装器，生成 Shadowrocket 可导入的链接和二维码。默认使用 **TCP 443**，可指定 **TCP 8443**；证书签发和续期统一使用 **HTTP-01 / TCP 80**。
 
-安装器修订号：`2026-10-18.4`。
+安装器修订号：`2026-10-18.5`。
 
 ## 安装
 
@@ -66,7 +66,7 @@ GCP VPC 防火墙规则必须匹配 VM 的 VPC、网络标记或服务账号；�
 
 如果已有 `sxmad/hysteria2-installer` 使用 TCP/UDP 443，选择 Trojan `--port 8443`，并开放 TCP 80；两者的监听及证书验证端口就可以分开。建议 Trojan 使用独立域名，例如 `trojan.example.com`。此脚本不会停止或修改 HY2。
 
-HTTP-01 的公网验证端口固定为 80，不能随 Trojan 改成 8443。TCP 80 如果已有 Web 服务占用，本脚本会停止安装并说明原因；当前版本不提供 webroot 或 DNS-01 集成。换端口本身不保证更快或更稳定。
+HTTP-01 的公网验证端口固定为 80，不能随 Trojan 改成 8443。TCP 80 如果已有 Web 服务占用，请配置验证路径并使用 `--acme-webroot DIR`；未指定时会在修改代理前停止。当前不提供 DNS-01 集成。换端口本身不保证更快或更稳定。
 
 前提：
 
@@ -263,3 +263,13 @@ TROJAN_BIN=/path/to/trojan TEST_SERVER_PORT=8443 bash tests/test_local_proxy.sh
 ## License
 
 MIT
+
+## TCP 80 已有网站时
+
+旧 Trojan 部署可能带有 Nginx/Apache，长期占用 TCP 80。修改代理的 TCP/UDP 端口不能解决这个证书冲突。先运行 `sudo ss -ltnp 'sport = :80'` 确认进程。
+
+配置现有网站，让 `http://你的域名/.well-known/acme-challenge/TOKEN` 对应 `/实际网站目录/.well-known/acme-challenge/TOKEN`，然后在安装命令中增加 `--acme-webroot /实际网站目录`。目录必须存在且为绝对路径；脚本不会猜测 `/var/www/html`、修改网站配置或停止网站。公网 TCP 80 仍须放行。已有站点可能重定向或拒绝新域名，不能仅凭目录存在就认定可用。
+
+签发和以后自动续期都会使用此目录，不能安装后删除验证路径。仅新建的公开验证文件使用可读权限，不修改已有网站目录权限；ACME 账号和私钥仍保存在私有目录。`update` 不会改证书模式；更改模式需重新安装，要保留客户端配置时必须传入原密码。
+
+参考[已有网站与失败重试说明](https://github.com/sxmad/mofatizi-installer/blob/main/README.zh-CN.md#tcp-80-已有网站时)。不要只临时停止 Web 服务完成安装，否则以后自动续期仍会遇到端口冲突。
