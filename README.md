@@ -149,6 +149,36 @@ bash /root/trojan-install.sh update
 
 To migrate an old TLS-ALPN-01 installation, first allow TCP 80, download the revised installer and run `install` again (with `--port 8443` if needed). Reinstallation backs up the config and generates a new password and QR by default; use `--password-stdin` to keep your existing password. Still-valid lego certificates are reused and subsequently renewed by the new HTTP-01 timer. Failed installs attempt to restore previous config and service state.
 
+## Long-running operation and memory
+
+**Do not schedule daily/weekly restarts by default.** The installer exits after setup; the long-running processes are Trojan and its small local HTTP fallback. Restarting a healthy proxy disconnects active sessions and does not fix a memory leak. The daily certificate timer reloads certificates without restarting Trojan.
+
+Both generated services use `Restart=on-failure` with `RestartSec=2s`. systemd can recover an exited/crashed process, subject to the host's start-rate limits. This does not detect a process that is still running but hung, or guarantee recovery while the VM is out of memory. Manual `systemctl stop` is respected.
+
+There is no evidence from this installer review that every server needs scheduled restarts, and **no claim that the core is leak-free**. The upstream [v1.16.0 memory report](https://github.com/trojan-gfw/trojan/issues/625) concerns router NAT/client mode with P2P traffic; it is not proof that this VM's server mode has the same problem. The old core and bundled dependencies remain a maintenance concern; see [Core maintenance limitation](#core-maintenance-limitation).
+
+Record samples under similar traffic and after quiet periods over 24–72 hours. A high RSS value after a busy period alone is not proof of a leak; repeated growth at comparable load, falling available RAM, and OOM events warrant investigation. Read-only checks:
+
+```bash
+date -Is
+systemctl show trojan.service \
+  -p ActiveState -p SubState -p MainPID -p NRestarts \
+  -p MemoryCurrent -p TasksCurrent -p Restart -p RestartUSec
+proxy_pid=$(systemctl show trojan.service -p MainPID --value)
+if [[ "$proxy_pid" =~ ^[1-9][0-9]*$ ]]; then
+  ps -p "$proxy_pid" -o pid,etime,rss,%mem,%cpu,comm
+fi
+free -h
+journalctl -k -b --since '24 hours ago' \
+  --grep 'Out of memory|oom-kill|Killed process' --no-pager
+journalctl --disk-usage
+df -h / /var/log
+```
+
+`rss` is KiB for the main process. `MemoryCurrent` is cgroup memory in bytes and can include more than process RSS; it may be unavailable if memory accounting is disabled. Inspect `trojan-fallback.service` separately if needed. Journal/disk growth is a separate issue from a proxy heap leak; the installer uses the host's journald retention policy.
+
+If memory keeps growing, save the version, workload, PID/uptime, samples and redacted logs before restarting. Prefer a maintained core/fix or enough VM memory for legitimate load. Restart the affected service only as a temporary mitigation, accepting interrupted connections. Neither a hard memory limit nor restarting before OOM repairs a leak; an arbitrary low limit can cause outages. This repository does not impose a fixed memory ceiling or install periodic restart jobs. Local functional tests do not replace a multi-day test on your VM.
+
 ## Troubleshooting
 
 | Symptom | Check |

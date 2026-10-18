@@ -149,6 +149,36 @@ bash /root/trojan-install.sh update
 
 从旧 TLS-ALPN-01 安装迁移此修复时，先开放 TCP 80，再重新下载新脚本执行 `install`（按需加 `--port 8443`）。重装会备份现有配置，默认生成新密码和二维码；需要沿用密码时使用 `--password-stdin`。证书仍有效时会复用本地 lego 证书，之后由新 HTTP-01 续期任务管理。安装失败会尝试恢复原配置和服务。
 
+## 长期运行与内存
+
+**默认不建议每天或每周定时重启。** 安装脚本完成后会退出，长期运行的是 Trojan 和本机 HTTP 回落服务。重启正常代理会断开现有连接，也不能修复内存泄漏。每天的证书定时器只热加载证书，不重启 Trojan。
+
+两个服务均配置 `Restart=on-failure`、`RestartSec=2s`。systemd 可在进程异常退出后尝试恢复，但受宿主机启动频率限制影响；它不能发现“进程仍在、服务已卡住”，也不能保证整机内存耗尽时恢复成功。手动 `systemctl stop` 不会触发自动重启。
+
+这次安装器检查没有发现所有服务器都必须定时重启的依据，也**不代表已证明核心没有内存泄漏**。上游 [v1.16.0 内存问题报告](https://github.com/trojan-gfw/trojan/issues/625)涉及路由器 NAT/客户端模式和 P2P 流量，不能直接认定你的 VM 服务端存在同一问题。旧核心及其内置依赖仍有维护风险，详见本页“核心维护限制”。
+
+建议在 24–72 小时内，分别记录相近负载和空闲后的数据。繁忙后 RSS 较高，本身不等于泄漏；相近负载下反复增长、可用内存下降或出现 OOM 才需要进一步排查。以下命令只读取状态：
+
+```bash
+date -Is
+systemctl show trojan.service \
+  -p ActiveState -p SubState -p MainPID -p NRestarts \
+  -p MemoryCurrent -p TasksCurrent -p Restart -p RestartUSec
+proxy_pid=$(systemctl show trojan.service -p MainPID --value)
+if [[ "$proxy_pid" =~ ^[1-9][0-9]*$ ]]; then
+  ps -p "$proxy_pid" -o pid,etime,rss,%mem,%cpu,comm
+fi
+free -h
+journalctl -k -b --since '24 hours ago' \
+  --grep 'Out of memory|oom-kill|Killed process' --no-pager
+journalctl --disk-usage
+df -h / /var/log
+```
+
+`rss` 是主进程常驻内存，单位 KiB；`MemoryCurrent` 是 cgroup 内存，单位字节，可能包含 RSS 以外的占用，关闭内存记账时可能无法读取。必要时单独检查 `trojan-fallback.service`。日志/磁盘增长与代理堆内存泄漏是不同问题，本安装器沿用宿主机 journald 保留策略。
+
+如果内存持续增长，先保存核心版本、负载、PID/运行时长、采样数据及脱敏日志，再考虑重启。优先采用维护中的核心/修复版本，或为正常负载提供足够的 VM 内存。只在必要时重启对应服务作为临时缓解，并接受连接中断。硬性内存上限或提前重启都不是泄漏修复；随意设置过低上限可能造成掉线。仓库不默认设置固定内存上限或定时重启任务。本机功能测试不能代替你的 VM 上连续多天运行测试。
+
 ## 排错
 
 | 现象 | 检查 |
