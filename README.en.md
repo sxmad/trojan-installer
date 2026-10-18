@@ -8,12 +8,33 @@ Installer revision: `2026-10-18.1`.
 
 ## Installation
 
-Point your domain A record at the VM's static public IPv4 and supply your own email:
+First point your domain A record at the VM's static public IPv4 and supply your own domain and email. The commands below pin the tested repair at commit `714d541`.
+
+### One-command installation
+
+Like HY2, download and install with one command. A regular user can run it through `sudo` without first entering a root shell. This example uses **8443**: allow inbound **TCP 80 and TCP 8443** and ensure those ports are not occupied by other services:
+
+```bash
+sudo bash -c 'bash <(curl -fsSL --proto "=https" --tlsv1.2 \
+  https://raw.githubusercontent.com/sxmad/trojan-installer/714d5412050d78a52ad01d62d07e6754cfae9122/install.sh) \
+  install \
+  --domain trojan.example.com \
+  --email you@example.com \
+  --port 8443'
+```
+
+Omit `--port 8443` to use the default **443**, allowing TCP 80 and TCP 443 instead. Stock-kernel BBR is attempted by default; append `--no-bbr` before the closing single quote to skip it. A successful installation prints the Shadowrocket URI and QR code.
+
+`--tlsv1.2` sets the minimum TLS version for the download and still permits TLS 1.3. It does not configure Trojan or Shadowrocket TLS versions.
+
+### Download before installing
+
+Alternatively, save the script for inspection and later management:
 
 ```bash
 sudo -i
 curl -fL --proto '=https' --tlsv1.2 \
-  https://raw.githubusercontent.com/sxmad/trojan-installer/main/install.sh \
+  https://raw.githubusercontent.com/sxmad/trojan-installer/714d5412050d78a52ad01d62d07e6754cfae9122/install.sh \
   -o /root/trojan-install.sh
 bash /root/trojan-install.sh install \
   --domain trojan.example.com --email you@example.com
@@ -72,7 +93,7 @@ Trojan's outer transport is TCP. The installer tries to load the stock `tcp_bbr`
 
 BBR may improve throughput and queueing delay on some high-latency or lossy paths; there is no fixed speed multiplier. It cannot fix outages, blocked IPs or expired certificates. These are system TCP defaults affecting other new TCP connections, not HY2's QUIC BBR or necessarily BBRv3. Changing the default qdisc does not replace existing NIC queues.
 
-Add `--no-bbr` to preserve current settings. Inspect defaults and actual connections:
+Add `--no-bbr` to the installation arguments to preserve current settings. In the one-command example, place it before the closing single quote. Inspect defaults and actual connections:
 
 ```bash
 sysctl net.ipv4.tcp_congestion_control net.core.default_qdisc
@@ -103,6 +124,8 @@ Checks cover config parsing, the systemd main process owning the listener, local
 Local success does not prove the client-to-GCP public route works. Test Shadowrocket on the actual client network, including peak-hour YouTube playback and sustained transfers.
 
 ## Management and migration
+
+The following commands use `/root/trojan-install.sh` saved by the download-first method. If you used one-command installation, save the script using the download command above before running management operations.
 
 ```bash
 bash /root/trojan-install.sh status

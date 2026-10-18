@@ -8,12 +8,33 @@
 
 ## 安装
 
-将 `trojan.example.com` 的 A 记录指向 VM 的静态公网 IPv4，填写自己的域名和邮箱：
+先将 `trojan.example.com` 的 A 记录指向 VM 的静态公网 IPv4，填写自己的域名和邮箱。以下命令固定使用已通过测试的修复版本 `714d541`。
+
+### 一键安装
+
+与 HY2 一样，一条命令完成下载和安装。普通用户通过 `sudo` 运行，无需先执行 `sudo -i`。下面使用 **8443**，执行前放行 **TCP 80 和 TCP 8443**，并确保端口未被其他服务占用：
+
+```bash
+sudo bash -c 'bash <(curl -fsSL --proto "=https" --tlsv1.2 \
+  https://raw.githubusercontent.com/sxmad/trojan-installer/714d5412050d78a52ad01d62d07e6754cfae9122/install.sh) \
+  install \
+  --domain trojan.example.com \
+  --email you@example.com \
+  --port 8443'
+```
+
+省略 `--port 8443` 即使用默认 **443**，对应放行 TCP 80 和 TCP 443。默认尝试启用系统 BBR；需要跳过时，在末尾单引号之前追加 `--no-bbr`。安装成功后直接输出 Shadowrocket 链接和二维码。
+
+`--tlsv1.2` 指定下载连接的最低 TLS 版本，仍允许协商 TLS 1.3；它不控制 Trojan 或 Shadowrocket 的 TLS 版本。
+
+### 下载后安装
+
+也可以先保存脚本，方便检查内容和后续管理：
 
 ```bash
 sudo -i
 curl -fL --proto '=https' --tlsv1.2 \
-  https://raw.githubusercontent.com/sxmad/trojan-installer/main/install.sh \
+  https://raw.githubusercontent.com/sxmad/trojan-installer/714d5412050d78a52ad01d62d07e6754cfae9122/install.sh \
   -o /root/trojan-install.sh
 bash /root/trojan-install.sh install \
   --domain trojan.example.com --email you@example.com
@@ -72,7 +93,7 @@ Trojan 的外层连接使用 TCP。安装器默认尝试加载系统已有的 `t
 
 BBR 可能改善高延迟或有丢包线路的吞吐与排队延迟，实际收益取决于线路；它不能修复断网、IP 阻断、证书失效，也没有固定的倍数提速。它是系统 TCP 设置，会影响其他新建 TCP 连接；不等于 HY2 的 QUIC BBR，也不代表 BBRv3。修改默认 qdisc 不会替换已经运行的网卡队列。
 
-保留系统原设置：在安装命令末尾加 `--no-bbr`。查看生效值及实际 TCP 连接：
+保留系统原设置：在安装参数末尾加 `--no-bbr`；使用上方一键命令时，该参数须放在末尾单引号之前。查看生效值及实际 TCP 连接：
 
 ```bash
 sysctl net.ipv4.tcp_congestion_control net.core.default_qdisc
@@ -103,6 +124,8 @@ systemctl start trojan-cert-renew.service
 本机测试通过不能证明客户端到 GCP 的公网线路畅通；仍须用 Shadowrocket 实际连接，并在常用网络和晚高峰观察 YouTube 播放、重连及持续传输。
 
 ## 管理与旧版本迁移
+
+以下命令使用“下载后安装”方式保存的 `/root/trojan-install.sh`。如果使用一键安装，先按上方下载命令保存脚本，再执行管理操作。
 
 ```bash
 bash /root/trojan-install.sh status
