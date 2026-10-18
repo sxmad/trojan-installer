@@ -15,8 +15,14 @@ First point your domain A record at the VM's static public IPv4 and supply your 
 Like HY2, download and install with one command. A regular user can run it through `sudo` without first entering a root shell. This example uses **8443**: allow inbound **TCP 80 and TCP 8443** and ensure those ports are not occupied by other services:
 
 ```bash
-sudo bash -c 'bash <(curl -fsSL --proto "=https" --tlsv1.2 https://raw.githubusercontent.com/sxmad/trojan-installer/main/install.sh) install --domain trojan.example.com --email you@example.com --port 8443'
+sudo bash -c 'bash <(curl -fsSL --proto "=https" --tlsv1.2 \
+  https://raw.githubusercontent.com/sxmad/trojan-installer/main/install.sh) install \
+  --domain trojan.example.com \
+  --email you@example.com \
+  --port 8443'
 ```
+
+Each argument has its own line so you can edit the domain, email and port independently. Each continuation backslash `\` must be the last character on its line, with no trailing spaces or comments. Keep the matching opening and closing single quotes.
 
 Omit `--port 8443` to use the default **443**, allowing TCP 80 and TCP 443 instead. Stock-kernel BBR is attempted by default; append `--no-bbr` before the closing single quote to skip it. A successful installation prints the Shadowrocket URI and QR code.
 
@@ -32,14 +38,17 @@ curl -fL --proto '=https' --tlsv1.2 \
   https://raw.githubusercontent.com/sxmad/trojan-installer/main/install.sh \
   -o /root/trojan-install.sh
 bash /root/trojan-install.sh install \
-  --domain trojan.example.com --email you@example.com
+  --domain trojan.example.com \
+  --email you@example.com
 ```
 
 For 8443:
 
 ```bash
 bash /root/trojan-install.sh install \
-  --domain trojan.example.com --email you@example.com --port 8443
+  --domain trojan.example.com \
+  --email you@example.com \
+  --port 8443
 ```
 
 The installer installs dependencies, selects an official stable release and verifies its SHA256, obtains a certificate, creates systemd services, and prints connection details after local HTTPS and SOCKS egress tests pass. It does not change cloud/host firewall rules or reboot the VM.

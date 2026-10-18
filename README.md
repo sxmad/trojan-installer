@@ -15,8 +15,14 @@
 与 HY2 一样，一条命令完成下载和安装。普通用户通过 `sudo` 运行，无需先执行 `sudo -i`。下面使用 **8443**，执行前放行 **TCP 80 和 TCP 8443**，并确保端口未被其他服务占用：
 
 ```bash
-sudo bash -c 'bash <(curl -fsSL --proto "=https" --tlsv1.2 https://raw.githubusercontent.com/sxmad/trojan-installer/main/install.sh) install --domain trojan.example.com --email you@example.com --port 8443'
+sudo bash -c 'bash <(curl -fsSL --proto "=https" --tlsv1.2 \
+  https://raw.githubusercontent.com/sxmad/trojan-installer/main/install.sh) install \
+  --domain trojan.example.com \
+  --email you@example.com \
+  --port 8443'
 ```
+
+每个参数单独一行，修改域名、邮箱和端口即可。续行反斜杠 `\` 必须是该行最后一个字符，后面不能有空格或注释；请保留首尾配对的单引号。
 
 省略 `--port 8443` 即使用默认 **443**，对应放行 TCP 80 和 TCP 443。默认尝试启用系统 BBR；需要跳过时，在末尾单引号之前追加 `--no-bbr`。安装成功后直接输出 Shadowrocket 链接和二维码。
 
@@ -32,14 +38,17 @@ curl -fL --proto '=https' --tlsv1.2 \
   https://raw.githubusercontent.com/sxmad/trojan-installer/main/install.sh \
   -o /root/trojan-install.sh
 bash /root/trojan-install.sh install \
-  --domain trojan.example.com --email you@example.com
+  --domain trojan.example.com \
+  --email you@example.com
 ```
 
 使用 8443：
 
 ```bash
 bash /root/trojan-install.sh install \
-  --domain trojan.example.com --email you@example.com --port 8443
+  --domain trojan.example.com \
+  --email you@example.com \
+  --port 8443
 ```
 
 安装器会安装依赖，选择官方稳定版并校验二进制 SHA256，申请证书，创建 systemd 服务，并通过本机 HTTPS 和 SOCKS5 出站检查后输出连接信息。脚本不修改云端或主机防火墙，也不重启 VM。
