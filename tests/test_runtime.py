@@ -186,6 +186,89 @@ resolve_release
         self.assertIn("--version v1.16.0", result.stderr)
 
 
+class IssuanceTests(unittest.TestCase):
+    def issue(self, failure_log, succeed_on=0):
+        with tempfile.TemporaryDirectory(prefix="trojan-issuance-test-") as work:
+            base = Path(work)
+            (base / "failure.log").write_text(failure_log)
+            source = (ROOT / "install.sh").read_text()
+            source = source.replace('readonly LEGO_DIR="${HOME_DIR}/lego"',
+                                    f"readonly LEGO_DIR={shlex.quote(str(base / 'lego'))}")
+            # Exercise interactive retry choices without requiring a terminal in CI.
+            source = source.replace('if [[ -t 0 ]]; then', 'if true; then')
+            fixture = base / "installer.sh"
+            fixture.write_text(source)
+            result = subprocess.run([
+                "bash", "-c", r'''source "$1"
+DOMAIN=example.com
+EMAIL=admin@example.com
+PORT=8443
+LEGO_BIN=lego
+install() { mkdir -p "$LEGO_DIR"; }
+cert_valid() { [[ -f "$TEST_WORK/valid" ]]; }
+sync_certificate() { echo CERT_DEPLOYED; }
+sleep() { :; }
+timeout() {
+  local IFS=' '
+  [[ " $* " == *" --http "* && " $* " != *" --tls "* ]] || return 99
+  echo attempt >> "$TEST_WORK/calls"
+  if [[ "$SUCCEED_ON" != 0 ]] && (( $(wc -l < "$TEST_WORK/calls") >= SUCCEED_ON )); then
+    touch "$TEST_WORK/valid"
+    echo '[INFO] Certificate obtained'
+    return 0
+  fi
+  cat "$TEST_WORK/failure.log"
+  return 1
+}
+obtain_certificate
+''', "test", str(fixture),
+            ], input="1\n1\n1\n", text=True, capture_output=True,
+                env=dict(os.environ, TEST_WORK=work, SUCCEED_ON=str(succeed_on)))
+            self.assertTrue((base / "calls").exists(), result.stdout + result.stderr)
+            calls = (base / "calls").read_text().splitlines()
+            return result, calls
+
+    def test_http_connection_failures_stop_before_another_ca_request(self):
+        for reason in ["Timeout during connect (likely firewall problem)", "Connection refused"]:
+            with self.subTest(reason=reason):
+                result, calls = self.issue(
+                    "[INFO] acme: Could not find solver for: tls-alpn-01\n"
+                    "[INFO] acme: use http-01 solver\n"
+                    "[example.com] acme: error: 400 :: urn:ietf:params:acme:error:connection :: "
+                    f"192.0.2.1: Fetching http://example.com/.well-known/acme-challenge/test: {reason}\n"
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(len(calls), 1)
+                self.assertIn("TCP 80", result.stderr)
+                self.assertIn("example.com", result.stderr)
+                self.assertIn("--port 8443", result.stderr)
+                self.assertNotIn("CERT_DEPLOYED", result.stdout)
+
+    def test_informational_solver_line_does_not_prevent_retry_success(self):
+        result, calls = self.issue(
+            "[INFO] acme: Could not find solver for: tls-alpn-01\n"
+            "[INFO] acme: use http-01 solver\n"
+            "acme: error: 400 :: urn:ietf:params:acme:error:badNonce :: Invalid nonce\n",
+            succeed_on=2,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(calls), 2)
+        self.assertIn("CERT_DEPLOYED", result.stdout)
+
+    def test_unknown_failures_keep_the_retry_limit(self):
+        result, calls = self.issue("unexpected ACME failure\n")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(len(calls), 3)
+        self.assertIn("连续失败 3 次", result.stderr)
+        self.assertNotIn("CERT_DEPLOYED", result.stdout)
+
+    def test_rate_limit_still_stops_before_retry(self):
+        result, calls = self.issue("urn:ietf:params:acme:error:rateLimited :: too many certificates\n")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(len(calls), 1)
+        self.assertIn("CA 速率限制", result.stderr)
+
+
 class RenewalTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

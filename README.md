@@ -4,7 +4,7 @@
 
 Trojan-GFW installer for x86_64 Debian/Ubuntu Google Cloud VMs, with Shadowrocket URI and QR output. The default listener is **TCP 443**, configurable to **TCP 8443** or another port. Certificate issuance and renewal use **HTTP-01 on TCP 80**.
 
-Installer revision: `2026-10-18.2`.
+Installer revision: `2026-10-18.3`.
 
 ## Installation
 
@@ -180,6 +180,10 @@ df -h / /var/log
 If memory keeps growing, save the version, workload, PID/uptime, samples and redacted logs before restarting. Prefer a maintained core/fix or enough VM memory for legitimate load. Restart the affected service only as a temporary mitigation, accepting interrupted connections. Neither a hard memory limit nor restarting before OOM repairs a leak; an arbitrary low limit can cause outages. This repository does not impose a fixed memory ceiling or install periodic restart jobs. Local functional tests do not replace a multi-day test on your VM.
 
 ## Troubleshooting
+
+If HTTP-01 reports `Fetching http://...: Timeout during connect` or `Connection refused`, check the **exact hostname passed to `--domain`** against the VM's public IP, then check public inbound **TCP 80** in both the GCP and host firewalls. A working installation on another VM does not prove that this VM's VPC and firewall target tags match. The `https-server` tag alone does not allow TCP 80, and allowing TCP 8443 or UDP 443 does not allow HTTP-01. Revision `2026-10-18.3` stops on these errors with actionable diagnostics; fix connectivity before rerunning the install command. Keep TCP 80 allowed for renewal.
+
+`Could not find solver for: tls-alpn-01` followed by `use http-01 solver` is informational: this installer deliberately uses HTTP-01. The temporary TCP 80 listener exists only during issuance/renewal, so a refused connection after the installer has exited does not by itself prove a firewall problem.
 
 | Symptom | Check |
 |---|---|

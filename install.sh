@@ -5,7 +5,7 @@ IFS=$'\n\t'
 umask 077
 
 readonly SCRIPT_NAME="trojan-installer"
-readonly SCRIPT_VERSION="2026-10-18.2"
+readonly SCRIPT_VERSION="2026-10-18.3"
 readonly VERIFIED_TROJAN_VERSION="1.16.0"
 readonly VERIFIED_TROJAN_SHA256="daad1ab6edd3f89066c5e1f42c6618b2f8cb59b7ba375dfb043d0c62c9e254ea"
 readonly RELEASE_API="https://api.github.com/repos/trojan-gfw/trojan/releases"
@@ -619,13 +619,19 @@ obtain_certificate() {
       rm -f "${log}"
       die "证书申请触发 CA 速率限制；请等待后再试，安装已中断。"
     fi
+    if grep -Eiq 'Fetching http://.*(Timeout during connect|Connection refused)' "${log}"; then
+      rm -f "${log}"
+      warn "HTTP-01 验证连接超时或被拒绝；请核对 ${DOMAIN} 的解析与 VM 公网 IP。"
+      warn "确认公网入站 TCP 80 已放行，GCP 规则匹配该 VM 的 VPC/网络标记，主机防火墙也允许；--port ${PORT} 不改变证书验证端口。"
+      die "请修复 TCP 80 可达性后重新运行安装命令，避免连续申请失败；未生成连接信息。"
+    fi
     if ((attempt >= 3)); then
       rm -f "${log}"
       die "证书申请连续失败 3 次，安装已中断。"
     fi
     local answer
     if [[ -t 0 ]]; then
-      read -r -p "证书申请似乎是临时错误。1. 修复并重试  2. 中断: " answer || answer=2
+      read -r -p "证书申请失败，请先检查并处理上面的错误。1. 重试  2. 中断: " answer || answer=2
     else
       answer=2
     fi
