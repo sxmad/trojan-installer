@@ -2,145 +2,190 @@
 
 [简体中文](README.md) | [English](README.en.md)
 
-A clean Trojan-GFW installer for Google Cloud VMs. It uses the official **Trojan-GFW v1.16.0**, TCP/TLS 443, the `lego` ACME client from Debian/Ubuntu repositories, and a `trojan://` link plus QR code that can be imported into Shadowrocket. There are no default domain or email values; one command completes dependencies, certificates, services, self-tests, and connection output.
+Trojan-GFW installer for x86_64 Debian/Ubuntu Google Cloud VMs, with Shadowrocket URI and QR output. The default listener is **TCP 443**, configurable to **TCP 8443** or another port. Certificate issuance and renewal use **HTTP-01 on TCP 80**.
 
-[Install](#one-click-installation) · [Preparation](#required-preparation) · [Options](#installation-options) · [Manage](#service-management-and-updates) · [Uninstall](#uninstall-and-retest) · [Troubleshooting](#troubleshooting)
+Installer revision: `2026-10-18.2`.
 
-## Design choices
+## Installation
 
-- The core is the official Trojan-GFW v1.16.0. Old Trojan-Go builds and unknown one-click scripts are not installed.
-- Trojan-GFW is TCP/TLS and needs **TCP 443 only**. Hysteria2’s UDP 443 rule is not needed.
-- Certificates use `lego` with **TLS-ALPN-01**. `lego` temporarily owns TCP 443 during issuance, then Trojan takes it back. Nginx, Certbot, and public TCP 80 are not required.
-- Trojan’s HTTPS fallback connects to a Python static server bound only to `127.0.0.1:18080`; the page content is `asdfq` and the Python server is not public.
-- If the kernel exposes BBR, the installer writes `/etc/sysctl.d/99-trojan-installer-bbr.conf` and attempts `fq + bbr`. Unsupported kernels only produce a warning; no third-party tuning script is installed.
+First point your domain A record at the VM's static public IPv4 and supply your own domain and email. The commands below fetch the installer from `main`; `--version` selects the Trojan core, independently of the installer revision.
 
-## Recommended Google Cloud VM
+### One-command installation
 
-For up to 15 users with speed as the priority, start with Debian 13, `e2-standard-2` (2 vCPUs / 8 GB), a 30 GB `pd-balanced` disk, Premium Tier, and a static external IPv4. Use `e2-standard-4` (4 vCPUs / 16 GB) for frequent simultaneous 4K streaming or downloads. The disk stores the OS, certificates, and logs, not proxy traffic.
+Like HY2, download and install with one command. A regular user can run it through `sudo` without first entering a root shell. This example uses **8443**: allow inbound **TCP 80 and TCP 8443** and ensure those ports are not occupied by other services:
 
-## One-click installation
+```bash
+sudo bash -c 'bash <(curl -fsSL --proto "=https" --tlsv1.2 https://raw.githubusercontent.com/sxmad/trojan-installer/main/install.sh) install --domain trojan.example.com --email you@example.com --port 8443'
+```
 
-Installer revision: `2026-10-02.7`. Supply your own domain and email:
+Omit `--port 8443` to use the default **443**, allowing TCP 80 and TCP 443 instead. Stock-kernel BBR is attempted by default; append `--no-bbr` before the closing single quote to skip it. A successful installation prints the Shadowrocket URI and QR code.
+
+`--tlsv1.2` sets the minimum TLS version for the download and still permits TLS 1.3. It does not configure Trojan or Shadowrocket TLS versions.
+
+### Download before installing
+
+Alternatively, save the script for inspection and later management:
 
 ```bash
 sudo -i
-bash <(curl -fsSL https://raw.githubusercontent.com/sxmad/trojan-installer/main/install.sh) \
-  install --domain trojan.example.com --email you@example.com
+curl -fL --proto '=https' --tlsv1.2 \
+  https://raw.githubusercontent.com/sxmad/trojan-installer/main/install.sh \
+  -o /root/trojan-install.sh
+bash /root/trojan-install.sh install \
+  --domain trojan.example.com --email you@example.com
 ```
 
-The script installs `lego`, `qrencode`, and other dependencies, downloads and verifies the pinned official Trojan binary, obtains a certificate, creates least-privilege systemd services, enables renewal, and prints the password, URI, and QR only after the local HTTPS fallback and Trojan SOCKS5 egress tests pass.
+For 8443:
 
-## Required preparation
+```bash
+bash /root/trojan-install.sh install \
+  --domain trojan.example.com --email you@example.com --port 8443
+```
 
-1. Point an A record at the VM’s static public IPv4. Remove a stale AAAA record that points elsewhere; the installer stops when it sees AAAA because ACME may choose the wrong IPv6. Do not use Cloudflare’s orange-cloud proxy.
-2. Allow **TCP 443** in the Google Cloud VPC firewall. The rule target must match this VM’s VPC, network tag, or service account, and the source ranges must cover clients and Let’s Encrypt.
-3. Use an official x86_64 Debian 12/13 or Ubuntu LTS image and allow the VM to reach Debian package mirrors, the GitHub release, and the ACME service.
+The installer installs dependencies, selects an official stable release and verifies its SHA256, obtains a certificate, creates systemd services, and prints connection details after local HTTPS and SOCKS egress tests pass. It does not change cloud/host firewall rules or reboot the VM.
 
-The installer does not change Google Cloud firewall rules, disable UFW/firewalld, install Nginx, upload account credentials, or reboot the VM. During issuance Trojan stops for a few seconds while `lego` uses TCP 443 for the challenge.
+## GCP and coexistence with HY2
 
-## Installation options
+| Purpose | Required inbound port |
+|---|---|
+| Default Trojan listener | TCP 443 |
+| Trojan with `--port 8443` | TCP 8443 |
+| Certificate issuance and future renewal, with either listener | TCP 80 |
+| Existing HY2 | Keep its rules, e.g. UDP 443 plus TCP 443 for its HTTPS/certificates |
+
+Both the GCP VPC firewall and any host firewall must permit the appropriate traffic. Match the VM's VPC and target network tag/service account. TCP 80 must be reachable by public ACME validators, not just your own client IP. Trojan does not need public UDP 8443. Do not expose the loopback fallback port 18080.
+
+If `sxmad/hysteria2-installer` already owns TCP/UDP 443, use Trojan `--port 8443` and allow TCP 80. Prefer a separate Trojan hostname such as `trojan.example.com`. This script does not stop or modify HY2.
+
+HTTP-01 always validates on public TCP 80; changing the proxy port cannot move that challenge to 8443. If another web server owns TCP 80, installation stops with an explanation; webroot and DNS-01 are not implemented. Changing ports alone does not guarantee better performance or reliability.
+
+Requirements:
+
+- x86_64 Debian 12/13 or Ubuntu LTS with systemd and access to package mirrors, GitHub releases, ACME and Google.
+- An A record pointing directly to the VM; no Cloudflare orange-cloud proxy. This installer listens on IPv4 only and rejects AAAA records.
+- A static external IPv4. Choose region and machine size from actual ISP routes, peak-hour loss and concurrent demand, rather than geographic distance alone.
+
+## Options
 
 | Option | Behavior |
 |---|---|
-| `--domain DOMAIN` | No default; prompt when omitted. |
-| `--email EMAIL` | No default; prompt for the ACME account email when omitted. |
-| `--password-stdin` | Read a 12–128-character password from stdin using letters, digits, `.`, `_`, or `-`; otherwise generate 16 hexadecimal characters. |
-| `--version v1.16.0` | Only the pinned official version is accepted; omission still uses v1.16.0. |
-| `--no-page` | Skip the `asdfq` index page while keeping the local HTTPS fallback and proxy self-test. |
-| `--yes` / `-y` | Skip the overwrite confirmation; certificate errors and self-tests still stop. |
-| `--keep-credentials` | Keep installer-generated URI, QR files, and config backups during uninstall; these are removed by default. |
-| `--help` | Show usage and the revision. |
+| `--domain DOMAIN` | No default; prompt if missing. |
+| `--email EMAIL` | No default; prompt for the ACME account email if missing. |
+| `--port PORT` | Default 443; integer 1–65535, except 80 reserved for HTTP-01 and 18080 for fallback. Used consistently in config, URI, QR and self-tests. |
+| `--no-bbr` | Skip BBR setup; leave existing settings unchanged, including already enabled BBR. |
+| `--password-stdin` | Read 12–128 characters using letters, digits, `.`, `_`, `-`; otherwise generate 16 random hexadecimal characters. |
+| `--version VERSION` | Default `latest` queries the official latest stable release. An explicit `vX.Y.Z`, such as `v1.16.0`, is also accepted. Prereleases are rejected. |
+| `--no-page` | Skip the `asdfq` index while retaining fallback service and proxy tests. |
+| `--yes` / `-y` | Skip the existing-install overwrite prompt. |
+| `--keep-credentials` | Preserve URI, QR and config backups during uninstall. |
+| `--help` | Show usage. |
 
-Missing domain/email values are read from the terminal. With `--password-stdin`, identity values are read only from `/dev/tty`, so the password pipe is not consumed; without a terminal, installation stops.
+With `--password-stdin`, missing identity values are read from `/dev/tty` rather than consuming the password pipe; absence of a terminal stops installation.
 
-## Output and self-tests
+### Core versions and download verification
 
-A successful install prints:
+As of 2026-10-18, the official Trojan-GFW latest stable release is still **v1.16.0 (released 2020-06-10)**. `latest` queries that project's stable release; it does not switch to Xray, sing-box or another Trojan implementation, and does not schedule background core updates.
 
-- a Shadowrocket URI: `trojan://password@domain:443?peer=domain&allowInsecure=0#trojan`; `peer` is the TLS SNI;
-- a Unicode QR code for Web SSH;
-- `/root/trojan-domain.png` and `/root/trojan-domain.txt`, both mode `600`.
+- By default the installer queries the GitHub Releases API. Network or rate-limit failures stop with a retry message instead of silently selecting another version.
+- Explicit `--version v1.16.0` skips the metadata query, but downloading still requires access to GitHub.
+- v1.16.0 uses the built-in verified SHA256. Other stable releases must provide the expected Linux amd64 asset and a GitHub SHA256 digest. Missing hashes or checksum mismatches stop installation before the downloaded binary is executed.
 
-Before printing it checks:
+## BBR: attempted by default, optional
 
-1. `trojan -t -c /etc/trojan/server.json`;
-2. an active `trojan.service` whose process listens on TCP 443;
-3. `https://domain/` returning the local `asdfq` page;
-4. a temporary official Trojan client using SOCKS5 to reach Google `generate_204` and receive HTTP 204.
+Trojan's outer transport is TCP. The installer tries to load the stock `tcp_bbr` module, applies `fq + bbr`, and persists it in `/etc/sysctl.d/99-trojan-installer-bbr.conf`. It does not install a kernel or third-party tuning scripts and requires no reboot. Unsupported kernels continue unchanged; failed application attempts to restore previous settings. An unmanaged file at the same path is not overwritten.
 
-Any failure withholds the new URI and QR. A working page proves TLS fallback only; Shadowrocket still needs a real client test.
+BBR may improve throughput and queueing delay on some high-latency or lossy paths; there is no fixed speed multiplier. It cannot fix outages, blocked IPs or expired certificates. These are system TCP defaults affecting other new TCP connections, not HY2's QUIC BBR or necessarily BBRv3. Changing the default qdisc does not replace existing NIC queues.
 
-Certificate failures show the `lego` log and offer up to three choices of `1. repair and retry` or `2. abort`. Domain, DNS, CAA, 443 firewall, and CA rate-limit problems must be fixed outside the VM; the script does not guess or change cloud rules. Rate limits stop immediately to avoid repeated requests.
-
-## Service management and updates
+Add `--no-bbr` to the installation arguments to preserve current settings. In the one-command example, place it before the closing single quote. Inspect defaults and actual connections:
 
 ```bash
-systemctl --no-pager --full status trojan.service
-systemctl is-enabled trojan.service
-systemctl is-active trojan.service
+sysctl net.ipv4.tcp_congestion_control net.core.default_qdisc
+ss -tin
+```
+
+## Certificate renewal
+
+`trojan-cert-renew.timer` checks daily and uses `lego --http renew --days 30` when renewal is due. It validates expiry, hostname and key matching, then deploys the files and sends `SIGUSR1` through `systemctl reload`. Trojan is not stopped or restarted: existing sessions keep their SSL context while new connections use the new certificate.
+
+ACME failures or invalid new certificates leave deployed certificates intact. If issuance succeeds but copying or reload fails, the next run retries deployment even though the cached certificate is already fresh. A stopped Trojan remains stopped. Persistent failures still require attention; retries are not a guarantee of uninterrupted public connectivity.
+
+```bash
 systemctl list-timers trojan-cert-renew.timer
+journalctl -u trojan-cert-renew.service --no-pager
+# Run the same check manually; fresh, deployed certificates are not reissued.
+systemctl start trojan-cert-renew.service
 ```
 
-`trojan-cert-renew.timer` checks daily. When renewal is due it stops Trojan, lets `lego` temporarily bind TCP 443, copies the new certificate, and starts Trojan again. Failures try to restore the service and are recorded in the journal.
+Reinstallation and binary updates still restart services and can interrupt existing connections. The no-stop behavior applies to scheduled renewal.
 
-Update the pinned official binary while preserving the current config and password:
+## Shadowrocket and self-tests
+
+Success prints `trojan://password@domain:port?peer=domain&allowInsecure=0#trojan`, a terminal QR and `/root/trojan-domain.{txt,png}` (mode 600). Confirm type Trojan, the selected port, Peer/SNI equal to the domain, and certificate verification enabled.
+
+Checks cover config parsing, the systemd main process owning the listener, local HTTPS fallback and Google `generate_204` returning 204 through a temporary Trojan client. The Python fallback binds only to `127.0.0.1:18080`; Trojan provides external TLS. Application UDP can be carried by Trojan while its client-to-server outer transport remains TCP/TLS.
+
+Local success does not prove the client-to-GCP public route works. Test Shadowrocket on the actual client network, including peak-hour YouTube playback and sustained transfers.
+
+## Management and migration
+
+The following commands use `/root/trojan-install.sh` saved by the download-first method. If you used one-command installation, save the script using the download command above before running management operations.
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/sxmad/trojan-installer/main/install.sh) update
+bash /root/trojan-install.sh status
+bash /root/trojan-install.sh restart
+bash /root/trojan-install.sh update
 ```
 
-`update` backs up the config and checks the new binary, config, and TCP 443. A service that was stopped remains stopped; no new QR is generated.
+`update` queries the latest stable release, then backs up and replaces the core while preserving config, password and listener port. Running services restart; stopped services remain stopped. Use `bash /root/trojan-install.sh update --version v1.16.0` to select a version explicitly. **It does not update the installer itself or regenerate installed renewal scripts. Without a newer upstream release, the core version stays the same.**
 
-## Uninstall and retest
-
-```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/sxmad/trojan-installer/main/install.sh) uninstall
-```
-
-After confirmation it stops and removes Trojan, the fallback service, the renewal timer, config, certificate copies, static page, lego account/certificate data, and the `trojan` user and BBR file created by this installer. It also removes installer-generated `/root/trojan-*.{txt,png}` files and all installer config backups by default; use `--keep-credentials` to retain them. Pre-existing Trojan users, binaries, and files outside installer-managed paths are kept. Packages, DNS, and Google Cloud firewall rules remain.
-
-A reinstall immediately after uninstall requests a new ACME certificate and may hit CA rate limits. Use a new VM to test first-boot dependencies and issuance; no VM reboot is required.
-
-## First Shadowrocket connection
-
-Scan or import the URI and confirm: type Trojan, domain address, port `443`, the newly generated password, Peer/SNI equal to the domain, and certificate verification enabled. For the first test, temporarily use global Proxy routing, then restore your own rules. Trojan does not need UDP 443.
+To migrate an old TLS-ALPN-01 installation, first allow TCP 80, download the revised installer and run `install` again (with `--port 8443` if needed). Reinstallation backs up the config and generates a new password and QR by default; use `--password-stdin` to keep your existing password. Still-valid lego certificates are reused and subsequently renewed by the new HTTP-01 timer. Failed installs attempt to restore previous config and service state.
 
 ## Troubleshooting
 
 | Symptom | Check |
 |---|---|
-| `lego` challenge timeout / connection refused | A record, stale AAAA, inbound TCP 443, firewall target, domain proxy, and any process already using 443. |
-| TCP 443 is occupied | Run `ss -ltnp`; the installer does not stop or overwrite another service. |
-| Service is active but the phone has no Internet | Check TCP 443, the QR’s current password, Peer/SNI, Shadowrocket routing, and another client network. |
-| HTTPS page works but proxy does not | The page tests TLS fallback only; check the password, URI, and client config. |
-| `apt-get` prints `Get`, `Hit`, or `Reading package lists... Done` | Dependency logs only; wait for issuance, self-tests, and the QR. |
-| BBR is not enabled | Check `cat /proc/sys/net/ipv4/tcp_available_congestion_control`; unsupported kernels keep the system default. |
-
-Logs may contain client addresses or authentication-related fields. Redact them before sharing:
+| ACME timeout / connection refused | A/AAAA, CAA, public TCP 80, firewall target, domain proxy and another process owning 80. |
+| Trojan port occupied | Inspect `ss -ltnp`; select `--port 8443` if appropriate. Other services are not stopped for you. |
+| Service active but phone has no Internet | TCP 443/8443, rule target, password, Peer/SNI, certificate validation, Shadowrocket routing and another client network. |
+| HTTPS works but proxy fails | The page only validates TLS fallback; check proxy authentication and config. |
+| Renewal failure | Read the renewal journal and fix TCP 80/DNS. Avoid repeated forced requests that may hit CA limits. |
+| BBR unavailable | Inspect `sysctl net.ipv4.tcp_available_congestion_control` and `sysctl net.ipv4.tcp_congestion_control`. Unsupported kernels retain defaults. |
+| "Only v1.16.0 is supported" without selecting a version | An older installer leaked the OS `VERSION` variable. Download revision `2026-10-18.2` or newer from `main`; the fixed `714d541...` URL always returns the older script. |
+| Official version query failed | Check GitHub API connectivity and rate limits; retry or explicitly add `--version v1.16.0`. |
 
 ```bash
 journalctl -b -u trojan.service --since '10 minutes ago' --no-pager
-journalctl -b -u trojan-cert-renew.service --no-pager
-ss -H -ltnp 'sport = :443'
+ss -H -ltnp 'sport = :8443'
 ```
 
-## Security and auditability
+Redact client addresses and authentication details before sharing logs.
 
-- The script pins the official Trojan-GFW v1.16.0 URL and release tarball SHA256; failed downloads or checksums stop installation.
-- The config is `root:trojan` mode `0640`; the private-key copy is `root:trojan` mode `0640`; the service runs as `trojan` with only the capability needed to bind 443.
-- It does not call third-party installer scripts, publish client archives, disable host firewalls, or install external BBR scripts.
-- Trojan provides TCP/TLS proxying only; speed depends mainly on the Google Cloud region, ISP route, and TCP loss.
+## Uninstall
 
-## Validation scope
+```bash
+bash /root/trojan-install.sh uninstall
+```
 
-The repository includes reproducible local tests: `tests/test_installer.sh` checks syntax, help, domain normalization, password generation, and input rejection; `TROJAN_BIN=/path/to/trojan tests/test_local_proxy.sh` uses a real Trojan-GFW binary to check config parsing, TLS fallback, authentication, and SOCKS5 forwarding. The installer itself pins the release SHA256, runs `trojan -t`, and checks the generated systemd services and listeners. Production still requires TLS-ALPN issuance on a real Google Cloud VM and a Shadowrocket connection test.
+Removes installer-managed services, config, certificates, lego data, static files and installer-created user. Removes its BBR config and attempts to restore original TCP settings. Generated URI, QR and backups are removed unless `--keep-credentials` is supplied. Packages, DNS, GCP/host firewalls and other services are not managed. Immediate uninstall/reinstall can hit certificate issuance limits.
 
-References:
+## Core maintenance limitation
 
-- [Trojan-GFW configuration](https://trojan-gfw.github.io/trojan/config.html)
-- [Trojan-GFW releases](https://github.com/trojan-gfw/trojan/releases)
-- [lego documentation](https://go-acme.github.io/lego/)
-- [Let's Encrypt TLS-ALPN-01](https://letsencrypt.org/docs/challenge-types/#tls-alpn-01)
+Currently `latest` still resolves to **Trojan-GFW v1.16.0**. The release dates to 2020 and the official Linux amd64 binary reports **OpenSSL 1.1.1g**. Supporting `latest` does not update dependencies in that old binary. A matching checksum verifies download consistency, and updating the system OpenSSL must not be assumed to update dependencies inside this prebuilt binary.
+
+The Trojan protocol is also implemented by [Xray](https://xtls.github.io/config/inbounds/trojan.html) and [sing-box](https://sing-box.sagernet.org/configuration/inbound/trojan/). For new long-term deployments, prioritize evaluating maintained implementations and their stable releases. This repository still installs Trojan-GFW and does not yet migrate config or services to another core.
+
+## Reproducible validation
+
+```bash
+bash tests/test_installer.sh
+TROJAN_BIN=/path/to/trojan TEST_SERVER_PORT=8443 bash tests/test_local_proxy.sh
+```
+
+The first suite uses no host services/sysctl changes and covers Debian/Ubuntu installation preflight, OS version variable isolation, stable release metadata and SHA256 policy, ports, URI, BBR skip/load/failure recovery, and real certificate fixtures for successful renewal, wrong hostname/key, copy failure, reload retries and stopped services. The second uses the real Trojan binary and a local CA to test generated config, TLS on 8443, SOCKS forwarding, the new certificate, an existing stream surviving reload, and new connections afterwards. CI also tests the default TCP 443 listener.
+
+These tests do not replace real-VM systemd, GCP firewall, public ACME and Shadowrocket validation, and do not measure cross-border performance.
+
+References: [Trojan config](https://trojan-gfw.github.io/trojan/config.html) · [SIGUSR1 reload](https://trojan-gfw.github.io/trojan/usage.html) · [HTTP-01](https://letsencrypt.org/docs/challenge-types/#http-01-challenge) · [Google BBR](https://github.com/google/bbr) · [lego](https://go-acme.github.io/lego/)
 
 ## License
 
