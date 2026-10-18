@@ -5,11 +5,10 @@ IFS=$'\n\t'
 umask 077
 
 readonly SCRIPT_NAME="trojan-installer"
-readonly SCRIPT_VERSION="2026-10-18.1"
-readonly TROJAN_VERSION="1.16.0"
-readonly TROJAN_TARBALL="trojan-${TROJAN_VERSION}-linux-amd64.tar.xz"
-readonly TROJAN_URL="https://github.com/trojan-gfw/trojan/releases/download/v${TROJAN_VERSION}/${TROJAN_TARBALL}"
-readonly TROJAN_SHA256="daad1ab6edd3f89066c5e1f42c6618b2f8cb59b7ba375dfb043d0c62c9e254ea"
+readonly SCRIPT_VERSION="2026-10-18.2"
+readonly VERIFIED_TROJAN_VERSION="1.16.0"
+readonly VERIFIED_TROJAN_SHA256="daad1ab6edd3f89066c5e1f42c6618b2f8cb59b7ba375dfb043d0c62c9e254ea"
+readonly RELEASE_API="https://api.github.com/repos/trojan-gfw/trojan/releases"
 readonly BINARY="/usr/local/bin/trojan"
 readonly CONFIG_DIR="/etc/trojan"
 readonly CONFIG_FILE="${CONFIG_DIR}/server.json"
@@ -35,7 +34,11 @@ PASSWORD=""
 PASSWORD_FROM_STDIN=0
 YES=0
 KEEP_CREDENTIALS=0
-VERSION=""
+REQUESTED_TROJAN_VERSION="latest"
+TROJAN_VERSION=""
+TROJAN_TARBALL=""
+TROJAN_URL=""
+TROJAN_SHA256=""
 PORT=443
 ENABLE_BBR=1
 STATIC_PAGE=1
@@ -79,7 +82,7 @@ Trojan-GFW clean installer
 
 Usage:
   install.sh [install] [options]
-  install.sh update
+  install.sh update [--version latest|vX.Y.Z]
   install.sh uninstall [--yes]
   install.sh start | stop | restart | status
 
@@ -89,13 +92,13 @@ Install options:
   --port PORT           Trojan TCP port (default: 443; e.g. 8443)
   --no-bbr              Leave existing TCP congestion-control settings unchanged
   --password-stdin      Read a custom 12-128-character password from stdin
-  --version VERSION     Only the pinned official version v1.16.0 is supported
+  --version VERSION     latest (default), or an official stable version vX.Y.Z
   --no-page             Do not create the local HTTPS fallback page
   --yes                 Do not ask before replacing an existing installation
   --keep-credentials    Keep generated URI/QR files and the current config backup on uninstall
   -h, --help            Show this help
 
-The installer uses the official Trojan-GFW v1.16.0 binary, a configurable TCP
+The installer resolves an official stable Trojan-GFW release, a configurable TCP
 port, a Let's Encrypt HTTP-01 certificate (TCP 80), and a local Python fallback.
 It does not install Nginx, Docker, panels, or third-party scripts. Trojan clients
 use a TCP/TLS connection; UDP 443 is not required.
@@ -116,7 +119,7 @@ parse_args() {
       --port) (($# >= 2)) || die "--port 需要参数。"; PORT="$2"; shift ;;
       --no-bbr) ENABLE_BBR=0 ;;
       --password-stdin) PASSWORD_FROM_STDIN=1 ;;
-      --version) (($# >= 2)) || die "--version 需要参数。"; VERSION="$2"; shift ;;
+      --version) (($# >= 2)) || die "--version 需要参数。"; REQUESTED_TROJAN_VERSION="$2"; shift ;;
       --no-page|--no-masquerade) STATIC_PAGE=0 ;;
       --yes|-y) YES=1 ;;
       --keep-credentials) KEEP_CREDENTIALS=1 ;;
@@ -172,16 +175,20 @@ validate_identity() {
 validate_inputs() {
   validate_identity
   validate_port
-  if [[ -n "${VERSION}" && "${VERSION}" != "v${TROJAN_VERSION}" ]]; then
-    die "当前安装器只支持官方 Trojan-GFW v${TROJAN_VERSION}。"
-  fi
+  validate_requested_version
   if (( PASSWORD_FROM_STDIN )); then
     IFS= read -r PASSWORD || die "未从标准输入读取到密码，已取消。"
   fi
   if [[ -z "${PASSWORD}" ]]; then
-  PASSWORD="$(openssl rand -hex 8)"
+    PASSWORD="$(openssl rand -hex 8)"
   fi
   [[ "${PASSWORD}" =~ ^[A-Za-z0-9._-]{12,128}$ ]] || die "密码必须为 12-128 位，只能包含字母、数字、点、下划线或短横线。"
+}
+
+validate_requested_version() {
+  [[ "${REQUESTED_TROJAN_VERSION}" == latest ]] && return 0
+  [[ "${REQUESTED_TROJAN_VERSION}" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "--version 需要 latest 或稳定版 vX.Y.Z。"
+  REQUESTED_TROJAN_VERSION="v${REQUESTED_TROJAN_VERSION#v}"
 }
 
 validate_port() {
@@ -225,10 +232,12 @@ PY
 }
 
 check_platform() {
+  local os_id
   [[ "$(uname -m)" == x86_64 ]] || die "当前仅支持 x86_64 Linux VM。"
   [[ -r /etc/os-release ]] || die "无法识别操作系统。"
-  . /etc/os-release
-  case "${ID:-}" in debian|ubuntu) ;; *) die "当前支持 Debian/Ubuntu；请使用带 systemd 的官方镜像。" ;; esac
+  # os-release defines VERSION and other generic names. Keep them in a subshell.
+  os_id="$(. /etc/os-release; printf '%s' "${ID:-}")"
+  case "${os_id}" in debian|ubuntu) ;; *) die "当前支持 Debian/Ubuntu；请使用带 systemd 的官方镜像。" ;; esac
   [[ -d /run/systemd/system ]] || die "此系统没有运行 systemd。"
 }
 
@@ -354,7 +363,78 @@ confirm_existing() {
   [[ "${answer}" =~ ^[Yy]$ ]] || die "已取消。"
 }
 
+parse_release_metadata() {
+  python3 - "$1" "${REQUESTED_TROJAN_VERSION}" "${VERIFIED_TROJAN_VERSION}" "${VERIFIED_TROJAN_SHA256}" <<'PY'
+import json, re, sys
+path, requested, verified_version, verified_sha = sys.argv[1:]
+with open(path) as f:
+    release = json.load(f)
+tag = release.get("tag_name", "")
+if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", tag):
+    raise SystemExit("Release tag is not a stable vX.Y.Z version")
+if release.get("draft") is not False or release.get("prerelease") is not False:
+    raise SystemExit("Draft and prerelease builds are not accepted")
+if requested != "latest" and tag != requested:
+    raise SystemExit("Release tag does not match the requested version")
+version = tag[1:]
+name = f"trojan-{version}-linux-amd64.tar.xz"
+assets = [a for a in release.get("assets", []) if a.get("name") == name]
+if len(assets) != 1:
+    raise SystemExit(f"Expected exactly one official asset: {name}")
+asset = assets[0]
+url = f"https://github.com/trojan-gfw/trojan/releases/download/{tag}/{name}"
+if asset.get("browser_download_url") != url or asset.get("state") != "uploaded":
+    raise SystemExit("Unexpected release asset URL or state")
+digest = asset.get("digest")
+if version == verified_version:
+    if digest and digest != f"sha256:{verified_sha}":
+        raise SystemExit("Official digest conflicts with the pinned known-release checksum")
+    checksum = verified_sha
+else:
+    match = re.fullmatch(r"sha256:([0-9a-fA-F]{64})", digest or "")
+    if not match:
+        raise SystemExit("This release has no SHA256 digest; refusing an unchecked download")
+    checksum = match[1].lower()
+print(version, name, url, checksum, sep="\n")
+PY
+}
+
+resolve_release() {
+  validate_requested_version
+  if [[ "${REQUESTED_TROJAN_VERSION}" == "v${VERIFIED_TROJAN_VERSION}" ]]; then
+    # The historical release has no GitHub digest, so retain its verified pin.
+    TROJAN_VERSION="${VERIFIED_TROJAN_VERSION}"
+    TROJAN_TARBALL="trojan-${TROJAN_VERSION}-linux-amd64.tar.xz"
+    TROJAN_URL="https://github.com/trojan-gfw/trojan/releases/download/v${TROJAN_VERSION}/${TROJAN_TARBALL}"
+    TROJAN_SHA256="${VERIFIED_TROJAN_SHA256}"
+  else
+    require_command curl; require_command python3
+    local metadata resolved endpoint fields=()
+    endpoint="${RELEASE_API}/latest"
+    [[ "${REQUESTED_TROJAN_VERSION}" == latest ]] || endpoint="${RELEASE_API}/tags/${REQUESTED_TROJAN_VERSION}"
+    metadata="$(mktemp)"
+    if ! curl --proto '=https' --tlsv1.2 -fsSL --retry 2 --connect-timeout 15 --max-time 60 \
+      -H 'Accept: application/vnd.github+json' -o "${metadata}" "${endpoint}"; then
+      rm -f "${metadata}"
+      die "无法查询官方版本（网络或 GitHub API 限流）；未替换程序。可重试，或显式指定 --version v${VERIFIED_TROJAN_VERSION}。"
+    fi
+    if ! resolved="$(parse_release_metadata "${metadata}")"; then
+      rm -f "${metadata}"
+      die "官方发布信息、Linux amd64 资产或 SHA256 不符合要求；未替换程序。"
+    fi
+    rm -f "${metadata}"
+    mapfile -t fields <<<"${resolved}"
+    ((${#fields[@]} == 4)) || die "官方版本元数据不完整。"
+    TROJAN_VERSION="${fields[0]}"
+    TROJAN_TARBALL="${fields[1]}"
+    TROJAN_URL="${fields[2]}"
+    TROJAN_SHA256="${fields[3]}"
+  fi
+  info "已选择官方 Trojan-GFW v${TROJAN_VERSION}（请求：${REQUESTED_TROJAN_VERSION}，SHA256 校验启用）。"
+}
+
 download_binary() {
+  [[ -n "${TROJAN_VERSION}" && -n "${TROJAN_URL}" && -n "${TROJAN_SHA256}" ]] || die "请先解析官方发布版本。"
   local tmp tarball extracted staged
   tmp="$(mktemp -d)"
   tarball="${tmp}/${TROJAN_TARBALL}"
@@ -825,14 +905,16 @@ print_connection() {
 
 install_trojan() {
   require_root; check_platform
-  info "安装器版本：${SCRIPT_VERSION}（Trojan-GFW v${TROJAN_VERSION}）"
+  info "安装器版本：${SCRIPT_VERSION}（请求 Trojan-GFW：${REQUESTED_TROJAN_VERSION}）"
   collect_identity
   validate_identity
   validate_port
+  validate_requested_version
   install_prerequisites
   require_command curl; require_command openssl; require_command lego; require_command python3; require_command ss; require_command systemctl
   LEGO_BIN="$(command -v lego)"
   validate_inputs
+  resolve_release
   validate_dns
   confirm_existing
   if port_in_use 80; then
@@ -914,6 +996,7 @@ update_trojan() {
   require_root; check_platform
   [[ -x "${BINARY}" && -s "${CONFIG_FILE}" ]] || die "未找到已安装的 Trojan 程序和配置；请先执行 install。"
   load_installed_port
+  resolve_release
   backup_existing
   download_binary
   if ! config_test; then

@@ -21,10 +21,18 @@ jobs:
           sudo apt-get install -y --no-install-recommends openssl python3 curl iproute2 xz-utils
       - name: Installer and failure-path regressions
         run: bash tests/test_installer.sh
+      - name: Resolve the live official stable release
+        shell: bash
+        run: |
+          source ./install.sh
+          resolve_release
       - name: Real Trojan forwarding and certificate hot reload on 8443
         shell: bash
         run: |
           source ./install.sh
+          # Keep proxy integration tests reproducible; latest metadata has separate tests.
+          REQUESTED_TROJAN_VERSION=v1.16.0
+          resolve_release
           curl --proto '=https' --tlsv1.2 -fL --retry 2 --connect-timeout 15 --max-time 120 \
             "${TROJAN_URL}" -o "${RUNNER_TEMP}/${TROJAN_TARBALL}"
           printf '%s  %s\n' "${TROJAN_SHA256}" "${RUNNER_TEMP}/${TROJAN_TARBALL}" | sha256sum -c -

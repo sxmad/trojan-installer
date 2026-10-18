@@ -4,23 +4,18 @@
 
 面向 Google Cloud x86_64 Debian/Ubuntu VM 的 Trojan-GFW 安装器，生成 Shadowrocket 可导入的链接和二维码。默认使用 **TCP 443**，可指定 **TCP 8443**；证书签发和续期统一使用 **HTTP-01 / TCP 80**。
 
-安装器修订号：`2026-10-18.1`。
+安装器修订号：`2026-10-18.2`。
 
 ## 安装
 
-先将 `trojan.example.com` 的 A 记录指向 VM 的静态公网 IPv4，填写自己的域名和邮箱。以下命令固定使用已通过测试的修复版本 `714d541`。
+先将 `trojan.example.com` 的 A 记录指向 VM 的静态公网 IPv4，填写自己的域名和邮箱。以下命令获取 `main` 分支的安装器；`--version` 选择的是 Trojan 核心版本，与安装器版本不同。
 
 ### 一键安装
 
 与 HY2 一样，一条命令完成下载和安装。普通用户通过 `sudo` 运行，无需先执行 `sudo -i`。下面使用 **8443**，执行前放行 **TCP 80 和 TCP 8443**，并确保端口未被其他服务占用：
 
 ```bash
-sudo bash -c 'bash <(curl -fsSL --proto "=https" --tlsv1.2 \
-  https://raw.githubusercontent.com/sxmad/trojan-installer/714d5412050d78a52ad01d62d07e6754cfae9122/install.sh) \
-  install \
-  --domain trojan.example.com \
-  --email you@example.com \
-  --port 8443'
+sudo bash -c 'bash <(curl -fsSL --proto "=https" --tlsv1.2 https://raw.githubusercontent.com/sxmad/trojan-installer/main/install.sh) install --domain trojan.example.com --email you@example.com --port 8443'
 ```
 
 省略 `--port 8443` 即使用默认 **443**，对应放行 TCP 80 和 TCP 443。默认尝试启用系统 BBR；需要跳过时，在末尾单引号之前追加 `--no-bbr`。安装成功后直接输出 Shadowrocket 链接和二维码。
@@ -34,7 +29,7 @@ sudo bash -c 'bash <(curl -fsSL --proto "=https" --tlsv1.2 \
 ```bash
 sudo -i
 curl -fL --proto '=https' --tlsv1.2 \
-  https://raw.githubusercontent.com/sxmad/trojan-installer/714d5412050d78a52ad01d62d07e6754cfae9122/install.sh \
+  https://raw.githubusercontent.com/sxmad/trojan-installer/main/install.sh \
   -o /root/trojan-install.sh
 bash /root/trojan-install.sh install \
   --domain trojan.example.com --email you@example.com
@@ -47,7 +42,7 @@ bash /root/trojan-install.sh install \
   --domain trojan.example.com --email you@example.com --port 8443
 ```
 
-安装器会安装依赖，校验固定版本的官方二进制，申请证书，创建 systemd 服务，并通过本机 HTTPS 和 SOCKS5 出站检查后输出连接信息。脚本不修改云端或主机防火墙，也不重启 VM。
+安装器会安装依赖，选择官方稳定版并校验二进制 SHA256，申请证书，创建 systemd 服务，并通过本机 HTTPS 和 SOCKS5 出站检查后输出连接信息。脚本不修改云端或主机防火墙，也不重启 VM。
 
 ## GCP 与同机 HY2
 
@@ -79,13 +74,21 @@ HTTP-01 的公网验证端口固定为 80，不能随 Trojan 改成 8443。TCP 8
 | `--port PORT` | 默认 443；支持 1–65535，但保留 80 给 HTTP-01、18080 给本地回落。配置、URI、二维码和自测同步使用此端口。 |
 | `--no-bbr` | 跳过 BBR 配置，保留已有系统设置；不是强制关闭已启用的 BBR。 |
 | `--password-stdin` | 从标准输入读取 12–128 位密码，允许字母、数字、`.`、`_`、`-`；否则生成 16 位随机十六进制密码。 |
-| `--version v1.16.0` | 只接受仓库固定的官方核心版本。 |
+| `--version VERSION` | 默认 `latest`，查询官方最新稳定版；也可指定 `vX.Y.Z`，例如 `v1.16.0`。不接受预发布版。 |
 | `--no-page` | 不生成 `asdfq` 首页，仍保留本地回落服务和代理自测。 |
 | `--yes` / `-y` | 跳过覆盖已有安装的确认。 |
 | `--keep-credentials` | 卸载时保留 URI、二维码和配置备份。 |
 | `--help` | 显示用法。 |
 
 使用 `--password-stdin` 时，缺少的域名和邮箱从 `/dev/tty` 读取，不会消耗密码管道；没有交互终端则停止。
+
+### 核心版本与下载校验
+
+截至 2026-10-18，Trojan-GFW 官方最新稳定版仍为 **v1.16.0（2020-06-10 发布）**。`latest` 表示查询该项目的官方稳定版，不会切换为 Xray、sing-box 或其他 Trojan 实现，也不会在后台自动更新核心。
+
+- 默认通过 GitHub Releases API 查询稳定版。API 不可达或限流时停止，并提示重试；不会静默改装其他版本。
+- 显式指定 `--version v1.16.0` 可跳过元数据查询，但下载仍需要访问 GitHub。
+- v1.16.0 使用安装器内置的已核实 SHA256；其他稳定版必须提供预期命名的 Linux amd64 资产及 GitHub 的 SHA256 digest。缺少哈希或校验失败即停止，不会执行未校验的二进制。
 
 ## BBR：默认尝试启用，可以跳过
 
@@ -133,7 +136,7 @@ bash /root/trojan-install.sh restart
 bash /root/trojan-install.sh update
 ```
 
-`update` 备份并替换固定版本核心，保留现有配置、密码和端口；运行中的服务会重启，原先停止的保持停止。**它不会更新已安装的续期脚本，也不代表升级到新核心版本。**
+`update` 默认查询最新稳定版，再备份并替换核心，保留现有配置、密码和端口；运行中的服务会重启，原先停止的保持停止。也可执行 `bash /root/trojan-install.sh update --version v1.16.0` 指定版本。**它不会更新安装器本身或已安装的续期脚本；若上游没有新发布，核心版本不会提高。**
 
 从旧 TLS-ALPN-01 安装迁移此修复时，先开放 TCP 80，再重新下载新脚本执行 `install`（按需加 `--port 8443`）。重装会备份现有配置，默认生成新密码和二维码；需要沿用密码时使用 `--password-stdin`。证书仍有效时会复用本地 lego 证书，之后由新 HTTP-01 续期任务管理。安装失败会尝试恢复原配置和服务。
 
@@ -147,6 +150,8 @@ bash /root/trojan-install.sh update
 | HTTPS 页面可打开但代理失败 | 页面只证明 TLS 回落可用，还要检查认证及代理配置。 |
 | 续期失败 | 查看续期 journal，修复 TCP 80/DNS；避免反复强制申请触发 CA 速率限制。 |
 | BBR 未生效 | `sysctl net.ipv4.tcp_available_congestion_control` 与 `sysctl net.ipv4.tcp_congestion_control`；不支持时保留系统默认。 |
+| 未指定版本却提示“只支持 v1.16.0” | 旧安装器的系统 `VERSION` 变量冲突；重新从 `main` 下载修订号 `2026-10-18.2` 或更新版本。固定 `714d541...` 地址不会获取修复。 |
+| 无法查询官方版本 | 检查 VM 到 GitHub API 的访问及限流；重试或显式加 `--version v1.16.0`。 |
 
 ```bash
 journalctl -b -u trojan.service --since '10 minutes ago' --no-pager
@@ -165,7 +170,9 @@ bash /root/trojan-install.sh uninstall
 
 ## 核心维护限制
 
-此修复保留原仓库固定的 **Trojan-GFW v1.16.0** 官方二进制及 SHA256。该 release 发布于 2020 年，二进制报告 **OpenSSL 1.1.1g**。校验哈希只能验证下载一致性，不能说明旧依赖仍获维护；更新系统 OpenSSL 不能假定会更新此预编译二进制内的依赖。此 PR 修复安装器功能，不将核心替换为其他实现，也不作完整安全审计结论。
+目前 `latest` 仍解析到 **Trojan-GFW v1.16.0**。该 release 发布于 2020 年，官方 Linux amd64 二进制报告 **OpenSSL 1.1.1g**。支持 `latest` 并不能让这个旧二进制的依赖获得更新；校验哈希只验证下载一致性，更新系统 OpenSSL 也不能假定会更新预编译二进制内的依赖。
+
+Trojan 协议还有 [Xray](https://xtls.github.io/config/inbounds/trojan.html)、[sing-box](https://sing-box.sagernet.org/configuration/inbound/trojan/) 等实现。对新增长期部署，应优先评估仍在维护的实现及其稳定版。本仓库仍安装 Trojan-GFW，尚未实现向其他核心的配置与服务迁移。
 
 ## 可复现验证
 
@@ -174,7 +181,7 @@ bash tests/test_installer.sh
 TROJAN_BIN=/path/to/trojan TEST_SERVER_PORT=8443 bash tests/test_local_proxy.sh
 ```
 
-第一组不接触主机服务或 sysctl，覆盖端口、URI、BBR 跳过/加载/失败恢复，以及真实证书下的续期成功、错误域名、错误密钥、复制失败、热加载失败重试和停止状态。第二组用真实 Trojan 二进制和本地 CA 验证生成配置、8443 TLS、SOCKS 转发、新证书生效、换证前的连接仍可收发以及换证后的新连接。
+第一组不接触主机服务或 sysctl，覆盖 Debian/Ubuntu 安装前置流程、系统版本变量隔离、稳定版元数据及 SHA256 校验策略、端口、URI、BBR 跳过/加载/失败恢复，以及真实证书下的续期成功、错误域名、错误密钥、复制失败、热加载失败重试和停止状态。第二组用真实 Trojan 二进制和本地 CA 验证生成配置、8443 TLS、SOCKS 转发、新证书生效、换证前的连接仍可收发以及换证后的新连接。CI 还验证默认 TCP 443。
 
 这些测试不替代真实 VM 上的 systemd、GCP 防火墙、ACME 公网签发和 Shadowrocket 实机验证；也不测量跨境线路性能。
 

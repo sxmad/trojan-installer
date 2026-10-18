@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise generated renewal scripts and BBR without root, ACME or host changes."""
 import os
+import json
 from pathlib import Path
 import re
 import shlex
@@ -46,6 +47,143 @@ class GenerationTests(unittest.TestCase):
             self.assertIn("ExecReload=/bin/kill -USR1 $MAINPID", (units / "trojan.service").read_text())
             self.assertIn(f"ExecStart={renewal}", (units / "trojan-cert-renew.service").read_text())
             self.assertEqual(renewal.stat().st_mode & 0o777, 0o750)
+
+
+class PlatformTests(unittest.TestCase):
+    def preflight(self, os_id, os_version, requested=None):
+        with tempfile.TemporaryDirectory(prefix="trojan-platform-test-") as work:
+            base = Path(work)
+            os_release = base / "os-release"
+            os_release.write_text(f'ID={os_id}\nVERSION="{os_version}"\nVERSION_ID="test"\n')
+            systemd = base / "systemd"
+            systemd.mkdir()
+            source = (ROOT / "install.sh").read_text()
+            source = source.replace("/etc/os-release", str(os_release))
+            source = source.replace("/run/systemd/system", str(systemd))
+            fixture = base / "installer.sh"
+            fixture.write_text(source)
+            args = ["install", "--domain", "example.com", "--email", "admin@example.com", "--port", "8443"]
+            if requested is not None:
+                args += ["--version", requested]
+            return subprocess.run([
+                "bash", "-c", r'''source "$1"; shift
+# Follow the actual main -> install -> platform -> input validation path.
+# Stop before DNS, ACME or any service/filesystem changes on the host.
+require_root() { :; }
+install_prerequisites() { echo DEPS_CHECKED; }
+lego() { :; }
+VERSION=caller-version
+ID=caller-id
+resolve_release() {
+  [[ "$VERSION" == caller-version && "$ID" == caller-id ]]
+  printf 'PREFLIGHT_OK version=%s port=%s\n' "$REQUESTED_TROJAN_VERSION" "$PORT"
+  exit 0
+}
+main "$@"
+''', "test", str(fixture), *args,
+            ], text=True, capture_output=True)
+
+    def test_default_after_real_platform_and_input_flow(self):
+        for os_id, version in [("debian", "12 (bookworm)"), ("debian", "13 (trixie)"),
+                               ("ubuntu", "24.04.3 LTS (Noble Numbat)")]:
+            with self.subTest(os_id=os_id, version=version):
+                result = self.preflight(os_id, version)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("PREFLIGHT_OK version=latest port=8443", result.stdout)
+
+    def test_explicit_version_survives_platform_detection(self):
+        result = self.preflight("debian", "12 (bookworm)", "v1.16.0")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("PREFLIGHT_OK version=v1.16.0 port=8443", result.stdout)
+
+    def test_invalid_version_stops_before_dependencies(self):
+        result = self.preflight("ubuntu", "24.04 LTS", "bad-version")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("DEPS_CHECKED", result.stdout)
+
+
+class ReleaseTests(unittest.TestCase):
+    @staticmethod
+    def metadata(version="1.16.0", digest=None):
+        name = f"trojan-{version}-linux-amd64.tar.xz"
+        return {"tag_name": f"v{version}", "draft": False, "prerelease": False,
+                "assets": [{"name": name, "state": "uploaded", "digest": digest,
+                            "browser_download_url": f"https://github.com/trojan-gfw/trojan/releases/download/v{version}/{name}"}]}
+
+    def parse(self, metadata, requested="latest", ok=True):
+        with tempfile.TemporaryDirectory(prefix="trojan-release-test-") as work:
+            path = Path(work) / "release.json"
+            path.write_text(json.dumps(metadata))
+            result = shell(f"REQUESTED_TROJAN_VERSION={shlex.quote(requested)}; "
+                           f"parse_release_metadata {shlex.quote(str(path))}")
+            self.assertEqual(result.returncode == 0, ok, result.stderr)
+            return result.stdout.splitlines()
+
+    def test_latest_current_release_uses_known_checksum(self):
+        fields = self.parse(self.metadata())
+        self.assertEqual(fields[0], "1.16.0")
+        self.assertEqual(fields[3], "daad1ab6edd3f89066c5e1f42c6618b2f8cb59b7ba375dfb043d0c62c9e254ea")
+
+    def test_new_stable_release_requires_official_sha256(self):
+        fields = self.parse(self.metadata("9.8.7", "sha256:" + "ab" * 32))
+        self.assertEqual(fields[0], "9.8.7")
+        self.assertEqual(fields[3], "ab" * 32)
+        self.parse(self.metadata("9.8.7"), ok=False)
+
+    def test_reject_conflicting_known_checksum(self):
+        self.parse(self.metadata(digest="sha256:" + "00" * 32), ok=False)
+
+    def test_reject_wrong_tag_prerelease_and_external_url(self):
+        self.parse(self.metadata(), requested="v9.8.7", ok=False)
+        metadata = self.metadata()
+        metadata["prerelease"] = True
+        self.parse(metadata, ok=False)
+        metadata = self.metadata()
+        metadata["assets"][0]["browser_download_url"] = "https://example.com/untrusted.tar.xz"
+        self.parse(metadata, ok=False)
+
+    def test_reject_missing_and_duplicate_assets(self):
+        metadata = self.metadata()
+        metadata["assets"] *= 2
+        self.parse(metadata, ok=False)
+        metadata["assets"] = []
+        self.parse(metadata, ok=False)
+
+    def test_pinned_release_does_not_need_metadata_network(self):
+        result = shell('''REQUESTED_TROJAN_VERSION=1.16.0
+curl() { echo 'unexpected network call' >&2; return 99; }
+resolve_release
+[[ "$REQUESTED_TROJAN_VERSION" == v1.16.0 && "$TROJAN_VERSION" == 1.16.0 ]]
+[[ "$TROJAN_SHA256" == "$VERIFIED_TROJAN_SHA256" ]]
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_latest_resolution_fetches_and_parses_metadata(self):
+        with tempfile.TemporaryDirectory(prefix="trojan-latest-test-") as work:
+            fixture = Path(work) / "release.json"
+            fixture.write_text(json.dumps(self.metadata()))
+            result = shell(r'''
+curl() {
+  local dest='' url=''
+  while (($#)); do
+    case "$1" in
+      -o) dest="$2"; shift 2 ;;
+      https://*) url="$1"; shift ;;
+      *) shift ;;
+    esac
+  done
+  [[ "$url" == https://api.github.com/repos/trojan-gfw/trojan/releases/latest ]]
+  cp "$RELEASE_FIXTURE" "$dest"
+}
+resolve_release
+[[ "$TROJAN_VERSION" == 1.16.0 && "$TROJAN_SHA256" == "$VERIFIED_TROJAN_SHA256" ]]
+''', env=dict(os.environ, RELEASE_FIXTURE=str(fixture)))
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_latest_failure_does_not_silently_fall_back(self):
+        result = shell('curl() { return 22; }; resolve_release')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--version v1.16.0", result.stderr)
 
 
 class RenewalTests(unittest.TestCase):
